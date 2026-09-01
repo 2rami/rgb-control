@@ -1,0 +1,898 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RGB 제어판</title>
+<style>
+  :root {
+    --bg: #0e1014;
+    --card: #171a21;
+    --line: #262b36;
+    --text: #e6e9ef;
+    --dim: #8b93a3;
+    --accent: #a855f7;
+    --ok: #22c55e;
+    --bad: #ef4444;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px;
+    background: var(--bg); color: var(--text);
+    font: 14px/1.5 "Pretendard", "Malgun Gothic", system-ui, sans-serif;
+  }
+  .wrap { max-width: 820px; margin: 0 auto; }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 20px;
+  }
+  h1 { font-size: 20px; margin: 0; font-weight: 600; }
+  .status { display: flex; align-items: center; gap: 8px; color: var(--dim); font-size: 13px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bad); }
+  .dot.on { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 12px; padding: 18px; margin-bottom: 16px;
+  }
+  .card h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--dim); margin: 0 0 14px; font-weight: 600;
+  }
+
+  .fans { display: flex; gap: 18px; flex-wrap: wrap; }
+  .fan { text-align: center; }
+  .ring {
+    width: 52px; height: 52px; border-radius: 50%;
+    border: 3px solid #000; margin-bottom: 6px;
+    transition: background-color .1s linear, box-shadow .1s linear;
+    position: relative;
+  }
+  .fan.dead .ring { background: #1b1e25 !important; border-color: #2a2f3a; box-shadow: none !important; }
+  .fan.dead .ring::after {
+    content: ""; position: absolute; inset: 12px;
+    background:
+      linear-gradient(45deg, transparent 45%, #4b5563 45%, #4b5563 55%, transparent 55%),
+      linear-gradient(-45deg, transparent 45%, #4b5563 45%, #4b5563 55%, transparent 55%);
+  }
+  .fan span { font-size: 11px; color: var(--dim); display: block; }
+  .fan.dead span { color: #4b5563; }
+
+  .meter { margin-bottom: 14px; }
+  .meter:last-child { margin-bottom: 0; }
+  .meter .top { display: flex; justify-content: space-between; margin-bottom: 6px; }
+  .meter .label { color: var(--dim); font-size: 13px; }
+  .meter .val { font-variant-numeric: tabular-nums; font-size: 13px; }
+  .bar { height: 6px; background: #10131a; border-radius: 3px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--accent); transition: width .4s ease; }
+
+  .btns { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+  button {
+    background: #1f2430; color: var(--text); border: 1px solid var(--line);
+    padding: 9px 16px; border-radius: 8px; cursor: pointer; font-size: 13px;
+    font-family: inherit; transition: all .15s;
+  }
+  button:hover { border-color: #3a4152; }
+  button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+  .row { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+  .row:last-child { margin-bottom: 0; }
+  .row .label { color: var(--dim); width: 56px; flex-shrink: 0; font-size: 13px; }
+  input[type=range] { flex: 1; accent-color: var(--accent); }
+  input[type=text] {
+    flex: 1; background: #10131a; color: var(--text);
+    border: 1px solid var(--line); border-radius: 8px;
+    padding: 8px 12px; font: inherit; font-size: 13px; min-width: 0;
+  }
+  input[type=text]:focus { outline: none; border-color: var(--accent); }
+  input[type=color] {
+    width: 44px; height: 30px; padding: 0; border: 1px solid var(--line);
+    border-radius: 6px; background: none; cursor: pointer;
+  }
+  .num { font-variant-numeric: tabular-nums; color: var(--dim); width: 38px; text-align: right; font-size: 13px; }
+
+  .sw { display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
+  .sw input { accent-color: var(--accent); width: 16px; height: 16px; cursor: pointer; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--dim); font-weight: 500; padding: 6px 8px; font-size: 12px; }
+  td { padding: 7px 8px; border-top: 1px solid var(--line); }
+  td.n { font-variant-numeric: tabular-nums; color: var(--dim); text-align: right; }
+  .tag {
+    font-size: 11px; padding: 2px 7px; border-radius: 4px;
+    background: #1f2430; color: var(--dim);
+  }
+  .tag.sync { background: rgba(168,85,247,.15); color: var(--accent); }
+  .err { color: var(--bad); font-size: 13px; }
+  /* 케이스 그림 - 사진을 보고 그렸다. 유리 옆판으로 본 시점이라
+     화면 왼쪽이 케이스 뒤쪽이다.
+       위 3개   크라켄(CPU) 라디에이터
+       왼쪽 1개 후면 배기 (고장난 팬)
+       오른쪽 2개 글카 수랭 라디에이터
+     유니팬은 링이 둘(안쪽·바깥)이고 채널이 달라서 따로 누른다. */
+  .caseWrap { background: #05070a; border-radius: 10px; padding: 6px; }
+  #caseView { width: 100%; height: auto; display: block; }
+  #caseView .case { fill: #0a0d12; stroke: #2a3240; stroke-width: 2; }
+  #caseView .mobo { fill: #0e1218; stroke: #232b38; stroke-width: 1.5; }
+  #caseView .rad  { fill: #1a212c; stroke: #2f3a4a; stroke-width: 1.5; }
+  #caseView .frame{ fill: #10141b; stroke: #2b3441; stroke-width: 2; }
+  #caseView .hubbg{ fill: #0c1016; }
+  #caseView .blade{ fill: none; stroke: #1c232e; stroke-width: 3.5; stroke-linecap: round; }
+  #caseView .tube {
+    fill: none; stroke: #171b22; stroke-width: 9;
+    stroke-linecap: round; opacity: .95;
+  }
+  #caseView .block { fill: #12161d; stroke: #39445a; stroke-width: 2; }
+  #caseView .ring {
+    fill: none; stroke: #39445a; cursor: pointer;
+    transition: stroke-width .12s, filter .12s;
+  }
+  #caseView .ring.out { stroke-width: 9; }
+  #caseView .ring.in  { stroke-width: 7; }
+  #caseView .ring:hover { stroke-width: 13; }
+  #caseView .ring.sel { stroke-width: 14; filter: drop-shadow(0 0 6px #fff); }
+  #caseView .part > * {
+    fill: #161b23; stroke: #39445a; stroke-width: 2;
+    cursor: pointer; transition: filter .15s;
+  }
+  #caseView .part:hover > * { stroke: #a855f7; }
+  #caseView .part.sel > * { stroke: #fff; stroke-width: 3; }
+  #caseView .gpuwave {
+    fill: none; stroke-width: 5; stroke-linecap: round; pointer-events: none;
+  }
+  #caseView .lbl  { fill: #6b7688; font-size: 11px; text-anchor: middle; }
+  #caseView .lbl2 { fill: #9aa6b8; font-size: 13px; text-anchor: middle;
+                    pointer-events: none; }
+  #caseView .tag  { fill: #46516420; font-size: 11px; text-anchor: middle;
+                    fill: #4a5568; }
+  #caseView .pnum {
+    fill: #cfd8e6; font-size: 14px; font-weight: 700;
+    text-anchor: middle; pointer-events: none;
+  }
+  #caseView .off { opacity: .25; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>RGB 제어판</h1>
+    <div class="status"><span class="dot" id="dot"></span><span id="statusText">연결 확인 중</span></div>
+  </header>
+
+  <div class="card">
+    <h2>팬 채널</h2>
+    <div class="fans" id="fans"></div>
+  </div>
+
+  <div class="card">
+    <h2>내 컴퓨터 — 눌러서 색 바꾸기</h2>
+    <div class="caseWrap">
+      <svg id="caseView" viewBox="0 0 560 430">
+        <defs>
+          <linearGradient id="glass" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stop-color="#ffffff" stop-opacity=".05"/>
+            <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+          </linearGradient>
+        </defs>
+
+        <rect x="6" y="6" width="548" height="418" rx="16" class="case"/>
+        <rect x="6" y="6" width="548" height="418" rx="16" fill="url(#glass)"/>
+
+        <!-- 메인보드 -->
+        <rect x="96" y="120" width="270" height="200" rx="6" class="mobo"/>
+
+        <!-- 관 (크라켄 -> 위 라디에이터) -->
+        <path class="tube" d="M250,168 C300,150 330,120 352,64"/>
+        <path class="tube" d="M262,186 C330,180 370,140 376,64"/>
+        <!-- 관 (글카 -> 오른쪽 라디에이터) -->
+        <path class="tube" d="M340,330 C420,330 430,300 436,262"/>
+        <path class="tube" d="M340,344 C430,350 452,330 452,262"/>
+
+      <rect x="70" y="26" width="330" height="14" rx="5" class="rad"/>
+      <g class="fan" data-spot="top1">
+        <rect x="83" y="33" width="98" height="98" rx="11" class="frame"/>
+        <circle cx="132" cy="82" r="34" class="hubbg"/>
+        <g class="blades" transform="translate(0,0)"><path class="blade" d="M132,82 Q157,82 152,107"/><path class="blade" d="M132,82 Q151,98 131,114"/><path class="blade" d="M132,82 Q136,106 111,106"/><path class="blade" d="M132,82 Q120,103 100,87"/><path class="blade" d="M132,82 Q109,90 105,65"/><path class="blade" d="M132,82 Q109,74 122,52"/><path class="blade" d="M132,82 Q120,61 144,52"/><path class="blade" d="M132,82 Q136,58 160,67"/><path class="blade" d="M132,82 Q151,66 163,88"/></g>
+        <circle class="ring out" data-part="top1#out" cx="132" cy="82" r="40"/>
+        <circle class="ring in"  data-part="top1#in"  cx="132" cy="82" r="16"/>
+        <text x="132" y="88" class="pnum">1</text>
+      </g>
+      <g class="fan" data-spot="top2">
+        <rect x="187" y="33" width="98" height="98" rx="11" class="frame"/>
+        <circle cx="236" cy="82" r="34" class="hubbg"/>
+        <g class="blades" transform="translate(0,0)"><path class="blade" d="M236,82 Q261,82 256,107"/><path class="blade" d="M236,82 Q255,98 235,114"/><path class="blade" d="M236,82 Q240,106 215,106"/><path class="blade" d="M236,82 Q224,103 204,87"/><path class="blade" d="M236,82 Q213,90 209,65"/><path class="blade" d="M236,82 Q213,74 226,52"/><path class="blade" d="M236,82 Q224,61 248,52"/><path class="blade" d="M236,82 Q240,58 264,67"/><path class="blade" d="M236,82 Q255,66 267,88"/></g>
+        <circle class="ring out" data-part="top2#out" cx="236" cy="82" r="40"/>
+        <circle class="ring in"  data-part="top2#in"  cx="236" cy="82" r="16"/>
+        <text x="236" y="88" class="pnum">2</text>
+      </g>
+      <g class="fan" data-spot="top3">
+        <rect x="291" y="33" width="98" height="98" rx="11" class="frame"/>
+        <circle cx="340" cy="82" r="34" class="hubbg"/>
+        <g class="blades" transform="translate(0,0)"><path class="blade" d="M340,82 Q365,82 360,107"/><path class="blade" d="M340,82 Q359,98 339,114"/><path class="blade" d="M340,82 Q344,106 319,106"/><path class="blade" d="M340,82 Q328,103 308,87"/><path class="blade" d="M340,82 Q317,90 313,65"/><path class="blade" d="M340,82 Q317,74 330,52"/><path class="blade" d="M340,82 Q328,61 352,52"/><path class="blade" d="M340,82 Q344,58 368,67"/><path class="blade" d="M340,82 Q359,66 371,88"/></g>
+        <circle class="ring out" data-part="top3#out" cx="340" cy="82" r="40"/>
+        <circle class="ring in"  data-part="top3#in"  cx="340" cy="82" r="16"/>
+        <text x="340" y="88" class="pnum">3</text>
+      </g>
+      <g class="fan" data-spot="left1">
+        <rect x="17" y="147" width="98" height="98" rx="11" class="frame"/>
+        <circle cx="66" cy="196" r="34" class="hubbg"/>
+        <g class="blades" transform="translate(0,0)"><path class="blade" d="M66,196 Q91,196 86,221"/><path class="blade" d="M66,196 Q85,212 65,228"/><path class="blade" d="M66,196 Q70,220 45,220"/><path class="blade" d="M66,196 Q54,217 34,201"/><path class="blade" d="M66,196 Q43,204 39,179"/><path class="blade" d="M66,196 Q43,188 56,166"/><path class="blade" d="M66,196 Q54,175 78,166"/><path class="blade" d="M66,196 Q70,172 94,181"/><path class="blade" d="M66,196 Q85,180 97,202"/></g>
+        <circle class="ring out" data-part="left1#out" cx="66" cy="196" r="40"/>
+        <circle class="ring in"  data-part="left1#in"  cx="66" cy="196" r="16"/>
+        <text x="66" y="202" class="pnum">4</text>
+      </g>
+      <rect x="490" y="120" width="14" height="250" rx="5" class="rad"/>
+      <g class="fan" data-spot="right1">
+        <rect x="387" y="133" width="106" height="106" rx="11" class="frame"/>
+        <circle cx="440" cy="186" r="38" class="hubbg"/>
+        <g class="blades" transform="translate(0,0)"><path class="blade" d="M440,186 Q467,186 462,214"/><path class="blade" d="M440,186 Q461,204 439,221"/><path class="blade" d="M440,186 Q445,213 417,212"/><path class="blade" d="M440,186 Q426,210 405,191"/><path class="blade" d="M440,186 Q414,195 410,168"/><path class="blade" d="M440,186 Q414,177 429,153"/><path class="blade" d="M440,186 Q426,162 453,153"/><path class="blade" d="M440,186 Q445,159 471,169"/><path class="blade" d="M440,186 Q461,168 474,193"/></g>
+        <circle class="ring out" data-part="right1#out" cx="440" cy="186" r="44"/>
+        <circle class="ring in"  data-part="right1#in"  cx="440" cy="186" r="18"/>
+        <text x="440" y="192" class="pnum">5</text>
+      </g>
+      <g class="fan" data-spot="right2">
+        <rect x="387" y="243" width="106" height="106" rx="11" class="frame"/>
+        <circle cx="440" cy="296" r="38" class="hubbg"/>
+        <g class="blades" transform="translate(0,0)"><path class="blade" d="M440,296 Q467,296 462,324"/><path class="blade" d="M440,296 Q461,314 439,331"/><path class="blade" d="M440,296 Q445,323 417,322"/><path class="blade" d="M440,296 Q426,320 405,301"/><path class="blade" d="M440,296 Q414,305 410,278"/><path class="blade" d="M440,296 Q414,287 429,263"/><path class="blade" d="M440,296 Q426,272 453,263"/><path class="blade" d="M440,296 Q445,269 471,279"/><path class="blade" d="M440,296 Q461,278 474,303"/></g>
+        <circle class="ring out" data-part="right2#out" cx="440" cy="296" r="44"/>
+        <circle class="ring in"  data-part="right2#in"  cx="440" cy="296" r="18"/>
+        <text x="440" y="302" class="pnum">6</text>
+      </g>
+
+        <!-- 크라켄 CPU 블록 + LCD -->
+        <g class="part lcd" data-part="lcd">
+          <circle cx="206" cy="204" r="52" class="block"/>
+          <circle cx="206" cy="204" r="41"/>
+          <text x="206" y="209" class="lbl2">LCD</text>
+        </g>
+
+        <!-- 램 두 짝 -->
+        <g class="part" data-part="ram">
+          <rect x="292" y="140" width="16" height="112" rx="4"/>
+          <rect x="316" y="140" width="16" height="112" rx="4"/>
+        </g>
+        <text x="312" y="268" class="lbl">RAM 32GB</text>
+
+        <!-- 글카 (iGame Neptune) -->
+        <g class="part" data-part="gpu">
+          <rect x="52" y="300" width="292" height="58" rx="9"/>
+          <path class="gpuwave" d="M64,340 C120,300 180,372 236,332 C280,302 310,330 332,318"/>
+        </g>
+        <text x="196" y="376" class="lbl">RTX 4070 Ti · 수랭</text>
+
+        <!-- 스피커 (케이스 밖) -->
+        <g class="part" data-part="speaker">
+          <rect x="392" y="386" width="120" height="24" rx="12"/>
+        </g>
+        <text x="452" y="404" class="lbl">스피커</text>
+
+        <text x="236" y="20" class="tag">크라켄 라디에이터</text>
+        <text x="66" y="250" class="tag">후면 배기</text>
+        <text x="440" y="360" class="tag">글카 라디에이터</text>
+      </svg>
+    </div>
+
+    <div id="lcdPanel" hidden>
+      <div class="row">
+        <span class="label">화면</span>
+        <div class="btns" style="margin:0">
+          <button data-lcd="sync">조명과 같은 색</button>
+          <button data-lcd="stats">상태판</button>
+          <button data-lcd="mirror">모니터 비추기</button>
+          <button data-lcd="video">영상 / GIF</button>
+          <button data-lcd="off">끄기</button>
+        </div>
+      </div>
+      <div class="row">
+        <span class="label"></span>
+        <input type="text" id="videoUrl2"
+               placeholder="유튜브 주소 · 재생목록 · Giphy GIF 주소 붙여넣고 엔터">
+        <label class="sw"><input type="checkbox" id="videoAudio2" checked> 소리</label>
+      </div>
+      <div class="row">
+        <span class="label"></span>
+        <div class="btns" style="margin:0" id="giphyPicks"></div>
+      </div>
+      <div class="row">
+        <span class="label">비출 범위</span>
+        <input type="range" id="mirrorBox2" min="240" max="1440" step="40" value="640">
+        <span class="num" id="mirrorBoxVal2">640</span>
+      </div>
+      <div class="row">
+        <span class="label"></span>
+        <span style="color:var(--dim);font-size:12px" id="lcdNote">-</span>
+      </div>
+    </div>
+    <div id="partPanel" hidden>
+      <div class="row">
+        <span class="label" id="partName">-</span>
+        <input type="color" id="partColor" value="#ffffff">
+        <button id="partClear">해제 (효과 따라감)</button>
+        <button id="partFind">어디야? (하얗게)</button>
+      </div>
+      <div class="row" id="slotRow">
+        <span class="label">채널</span>
+        <button id="slotPrev">◂</button>
+        <span class="num" id="slotName" style="width:auto">-</span>
+        <button id="slotNext">▸</button>
+        <span style="color:var(--dim);font-size:12px">
+          ▸ 를 누르면 다음 채널이 하얗게 켜져. 고른 자리가 실제로 켜질 때까지 누르면 돼</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>시스템</h2>
+    <div class="meter">
+      <div class="top"><span class="label" id="cpuLabel">CPU</span><span class="val" id="cpuVal">-</span></div>
+      <div class="bar"><i id="cpuBar" style="width:0%"></i></div>
+    </div>
+    <div class="meter">
+      <div class="top"><span class="label" id="gpuLabel">GPU</span><span class="val" id="gpuVal">-</span></div>
+      <div class="bar"><i id="gpuBar" style="width:0%"></i></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>효과</h2>
+    <div class="btns" id="modes">
+      <button data-mode="wave">물결</button>
+      <button data-mode="rainbow">순환</button>
+      <button data-mode="breathe">숨쉬기</button>
+      <button data-mode="static">고정</button>
+      <button data-mode="soft">은은</button>
+      <button data-mode="ice">아이스</button>
+      <button data-mode="depth">깊이</button>
+      <button data-mode="screen">화면 동기화</button>
+    </div>
+    <div class="btns" id="soundModes">
+      <button data-mode="pulse">소리 · 출렁</button>
+      <button data-mode="vu">소리 · 레벨미터</button>
+      <button data-mode="spectrum">소리 · 대역색</button>
+    </div>
+    <div id="audioBox" class="audio">
+      <div class="top">
+        <span class="label" id="audioLabel">소리</span>
+        <span class="val" id="audioVal">-</span>
+      </div>
+      <div class="bar"><i id="audioBar" style="width:0%"></i></div>
+      <div class="bands">
+        <div><span>저음</span><div class="bar"><i id="bandLow" style="width:0%"></i></div></div>
+        <div><span>중음</span><div class="bar"><i id="bandMid" style="width:0%"></i></div></div>
+        <div><span>고음</span><div class="bar"><i id="bandHigh" style="width:0%"></i></div></div>
+      </div>
+    </div>
+    <div class="row">
+      <span class="label">속도</span>
+      <input type="range" id="speed" min="0.1" max="3" step="0.1" value="1">
+      <span class="num" id="speedVal">1.0</span>
+    </div>
+    <div class="row">
+      <span class="label">색</span>
+      <input type="color" id="color" value="#a000ff">
+      <span class="num" style="width:auto">숨쉬기 · 고정에만 쓰임</span>
+    </div>
+    <div class="row">
+      <span class="label">동기화</span>
+      <label class="sw"><input type="checkbox" id="sync" checked> 스피커 · 그래픽카드도 같은 색으로</label>
+    </div>
+    <div class="row">
+      <span class="label"></span>
+      <label class="sw"><input type="checkbox" id="syncRam" checked> 램도 포함
+        <span style="color:var(--dim);font-size:12px">— SMBus라 1초에 한 번만 따라옴</span></label>
+    </div>
+    <div class="row">
+      <span class="label"></span>
+      <label class="sw"><input type="checkbox" id="syncSolid" checked> 팬과 같은 색 하나로
+        <span style="color:var(--dim);font-size:12px">— 끄면 램·글카가 팬 그라데이션을 따라감</span></label>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>크라켄 (수랭 · LCD)</h2>
+    <div class="meter">
+      <div class="top"><span class="label">수온</span><span class="val" id="liquidVal">-</span></div>
+      <div class="bar"><i id="liquidBar" style="width:0%"></i></div>
+    </div>
+    <div class="meter">
+      <div class="top"><span class="label">펌프</span><span class="val" id="pumpVal">-</span></div>
+      <div class="bar"><i id="pumpBar" style="width:0%"></i></div>
+    </div>
+
+    <div class="row" style="margin-top:16px">
+      <span class="label">펌프</span>
+      <div class="btns" style="margin:0">
+        <button data-pump="curve">수온 따라</button>
+        <button data-pump="fixed">손으로</button>
+      </div>
+    </div>
+    <div class="row">
+      <span class="label"></span>
+      <input type="range" id="pumpDuty" min="60" max="100" step="1" value="90">
+      <span class="num" id="pumpDutyVal">90%</span>
+    </div>
+
+    <div class="row">
+      <span class="label">화면</span>
+      <div class="btns" style="margin:0">
+        <button data-lcd="stats">상태판</button>
+        <button data-lcd="mirror">화면 비추기</button>
+        <button data-lcd="video">영상</button>
+        <button data-lcd="off">끄기</button>
+      </div>
+    </div>
+    <div class="row">
+      <span class="label"></span>
+      <input type="text" id="videoUrl" placeholder="유튜브 주소를 붙여넣고 엔터">
+      <label class="sw"><input type="checkbox" id="videoAudio" checked> 소리</label>
+    </div>
+    <div class="row">
+      <span class="label"></span>
+      <span style="color:var(--dim);font-size:12px" id="loginNote">-</span>
+      <button id="loginToggle" style="padding:5px 12px;font-size:12px">로그인 설정</button>
+    </div>
+    <div id="loginBox" hidden>
+      <div class="hint">
+        로그인이 있어야 열리는 것 — 나이 제한 영상, 멤버십 전용,
+        내 비공개 재생목록, 나중에 볼 동영상.<br>
+        크롬 확장 <b id="extName">Get cookies.txt LOCALLY</b> 를 깔고
+        youtube.com 을 연 채로 내보낸 다음, 그 내용을 아래에 붙여넣어.
+        (파일을 열어서 전체 복사) 한 번만 하면 계속 쓰여.
+      </div>
+      <textarea id="cookieText" rows="4"
+        placeholder="cookies.txt 내용을 여기에 붙여넣기 (Netscape 형식 또는 JSON)"></textarea>
+      <div class="btns" style="margin-top:8px">
+        <button id="cookieSave">저장</button>
+        <button id="cookieBrowser">브라우저에서 가져오기</button>
+        <button id="cookieClear">지우기</button>
+      </div>
+      <div id="cookieMsg" style="font-size:12px;color:var(--dim);margin-top:6px"></div>
+    </div>
+    <div class="row">
+      <span class="label"></span>
+      <input type="range" id="mirrorBox" min="240" max="1440" step="40" value="640">
+      <span class="num" id="mirrorBoxVal">640</span>
+    </div>
+    <div class="row">
+      <span class="label"></span>
+      <span style="color:var(--dim);font-size:12px" id="krakenNote">-</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>장치</h2>
+    <table><thead><tr><th>이름</th><th>종류</th><th style="text-align:right">LED</th><th></th></tr></thead>
+      <tbody id="devs"></tbody></table>
+  </div>
+
+  <div id="err" class="err"></div>
+
+</div>
+
+<script>
+let dragging = false;
+const $ = (id) => document.getElementById(id);
+
+// 슬라이더를 잡고 있는 동안엔 폴링이 값을 덮어쓰지 않게 한다.
+$("speed").addEventListener("pointerdown", () => dragging = true);
+$("speed").addEventListener("pointerup", () => dragging = false);
+
+function send(patch) {
+  fetch("/api/effect", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(patch),
+  });
+}
+
+const MODE_BUTTONS = "#modes button, #soundModes button";
+document.querySelectorAll(MODE_BUTTONS).forEach(b => {
+  b.onclick = () => send({mode: b.dataset.mode});
+});
+$("speed").oninput = () => {
+  $("speedVal").textContent = (+$("speed").value).toFixed(1);
+  send({speed: $("speed").value});
+};
+$("color").oninput = () => send({color: $("color").value});
+$("sync").onchange = () => send({sync_all: $("sync").checked});
+$("syncRam").onchange = () => send({sync_ram: $("syncRam").checked});
+$("syncSolid").onchange = () => send({sync_solid: $("syncSolid").checked});
+
+document.querySelectorAll("#modes button, #soundModes button");
+document.querySelectorAll("[data-pump]").forEach(b => {
+  b.onclick = () => sendKraken({pump_mode: b.dataset.pump});
+});
+document.querySelectorAll("[data-lcd]").forEach(b => {
+  b.onclick = () => sendKraken({lcd_mode: b.dataset.lcd});
+});
+$("pumpDuty").addEventListener("pointerdown", () => dragging = true);
+$("pumpDuty").addEventListener("pointerup", () => dragging = false);
+$("pumpDuty").oninput = () => {
+  $("pumpDutyVal").textContent = $("pumpDuty").value + "%";
+  // 손으로 밀면 자동으로 "손으로" 모드가 되는 게 자연스럽다.
+  sendKraken({pump_duty: $("pumpDuty").value, pump_mode: "fixed"});
+};
+$("mirrorBox").addEventListener("pointerdown", () => dragging = true);
+$("mirrorBox").addEventListener("pointerup", () => dragging = false);
+$("mirrorBox").oninput = () => {
+  $("mirrorBoxVal").textContent = $("mirrorBox").value;
+  sendKraken({mirror_box: $("mirrorBox").value});
+};
+
+// 엔터를 치면 그 주소로 영상 모드로 넘어간다. 버튼을 또 누를 필요 없다.
+$("videoUrl").addEventListener("keydown", (e) => {
+  if (e.key !== "Enter") return;
+  sendKraken({video_url: $("videoUrl").value, lcd_mode: "video"});
+});
+$("videoAudio").onchange = () => sendKraken({video_audio: $("videoAudio").checked});
+
+$("loginToggle").onclick = () => {
+  $("loginBox").hidden = !$("loginBox").hidden;
+};
+
+async function sendCookies(body) {
+  $("cookieMsg").textContent = "처리 중...";
+  try {
+    const r = await fetch("/api/cookies", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    $("cookieMsg").textContent = (j.ok ? "OK  " : "안 됨  ") + j.message;
+    if (j.ok) $("cookieText").value = "";
+  } catch (e) {
+    $("cookieMsg").textContent = "요청 실패: " + e;
+  }
+}
+
+$("cookieSave").onclick = () => sendCookies({text: $("cookieText").value});
+$("cookieBrowser").onclick = () => sendCookies({from_browser: 1});
+$("cookieClear").onclick = () => sendCookies({clear: 1});
+
+function sendKraken(patch) {
+  fetch("/api/kraken", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(patch),
+  });
+}
+
+function renderKraken(k) {
+  if (!k) return;
+  const s = k.state || {};
+  document.querySelectorAll("[data-pump]").forEach(b =>
+    b.classList.toggle("on", b.dataset.pump === s.pump_mode));
+  document.querySelectorAll("[data-lcd]").forEach(b =>
+    b.classList.toggle("on", b.dataset.lcd === s.lcd_mode));
+
+  if (k.ok) {
+    $("liquidVal").textContent = (k.liquid ?? 0).toFixed(1) + " °C";
+    // 수온은 30~60도 구간만 봐도 충분하다. 0부터 그리면 막대가 안 움직인다.
+    $("liquidBar").style.width =
+      Math.max(0, Math.min(100, ((k.liquid - 30) / 30) * 100)) + "%";
+    $("pumpVal").textContent = `${k.pump_rpm ?? 0} rpm  ${k.pump_duty ?? 0}%`;
+    $("pumpBar").style.width = (k.pump_duty ?? 0) + "%";
+    const fanNote = (k.fan_rpm === 0) ? " · 크라켄에 직접 물린 팬 없음" : "";
+    let screen = (s.lcd_mode === "off") ? "화면 끔" : `화면 초당 ${k.lcd_fps}장`;
+    if (s.lcd_mode === "video") {
+      if (k.video_error) screen = "영상 실패: " + k.video_error;
+      else if (k.video_playing) {
+        const n = (k.video_total > 1) ? ` [${k.video_index}/${k.video_total}]` : "";
+        screen = `▶ ${k.video_title}${n}  (초당 ${k.lcd_fps}장)`;
+      }
+      else screen = "영상 준비 중...";
+    }
+    $("krakenNote").textContent = screen + fanNote;
+  } else {
+    $("liquidVal").textContent = "-";
+    $("pumpVal").textContent = "-";
+    $("liquidBar").style.width = "0%";
+    $("pumpBar").style.width = "0%";
+    $("krakenNote").textContent = k.error
+      ? ("못 붙음: " + k.error + "  (NZXT CAM 이 켜져 있으면 못 씁니다)")
+      : "연결 확인 중";
+  }
+  if (!dragging) {
+    $("pumpDuty").value = s.pump_duty;
+    $("pumpDutyVal").textContent = s.pump_duty + "%";
+    $("mirrorBox").value = s.mirror_box;
+    $("mirrorBoxVal").textContent = s.mirror_box;
+    if (document.activeElement !== $("videoUrl")) $("videoUrl").value = s.video_url || "";
+    $("videoAudio").checked = s.video_audio;
+    const lg = k.login || {};
+    $("loginNote").textContent = "유튜브 로그인: " + (lg.how || "-");
+    if (lg.extension) $("extName").textContent = lg.extension;
+  }
+}
+
+// ---- 케이스 그림 ----
+// 유니팬은 링이 둘(안쪽·바깥 테두리)이고 서로 다른 채널이라 따로 누른다.
+// LCD 를 누르면 화면 설정이 열린다.
+const FAN_SPOTS = ["top1","top2","top3","left1","right1","right2"];
+const SPOT_NAME = {top1:"위 팬 1", top2:"위 팬 2", top3:"위 팬 3",
+                   left1:"LCD 왼쪽 팬", right1:"오른쪽 위 팬", right2:"오른쪽 아래 팬",
+                   ram:"램", gpu:"그래픽카드", speaker:"스피커", lcd:"크라켄 화면"};
+let selPart = null;
+
+function partLabel(id) {
+  const [base, ring] = id.split("#");
+  const tail = ring === "in" ? " · 안쪽 링" : ring === "out" ? " · 바깥 테두리" : "";
+  return (SPOT_NAME[base] || base) + tail;
+}
+
+function selectPart(id, el) {
+  selPart = id;
+  document.querySelectorAll("#caseView .sel").forEach(x => x.classList.remove("sel"));
+  if (el) el.classList.add("sel");
+
+  const isLcd = (id === "lcd");
+  $("partPanel").hidden = isLcd;
+  $("lcdPanel").hidden = !isLcd;
+  if (isLcd) return;
+
+  $("partName").textContent = partLabel(id);
+  $("slotRow").style.display = FAN_SPOTS.includes(id.split("#")[0]) ? "flex" : "none";
+}
+
+document.querySelectorAll("#caseView [data-part]").forEach(el => {
+  el.onclick = (e) => { e.stopPropagation(); selectPart(el.dataset.part, el); };
+});
+
+function sendPart(body) {
+  fetch("/api/part", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body),
+  });
+}
+
+$("partColor").oninput = () => selPart && sendPart({part: selPart, color: $("partColor").value});
+$("partClear").onclick = () => selPart && sendPart({part: selPart, color: null});
+$("partFind").onclick  = () => selPart && sendPart({part: selPart, find: 1});
+$("slotPrev").onclick  = () => selPart && sendPart({spot: selPart, next: -1});
+$("slotNext").onclick  = () => selPart && sendPart({spot: selPart, next: 1});
+
+// ---- LCD 설정 (케이스 그림에서 LCD 를 눌렀을 때) ----
+// Giphy 는 "media" 주소여야 ffmpeg 이 바로 읽는다. 페이지 주소를 넣으면
+// HTML 이 와서 아무것도 안 나온다. 그래서 자주 쓸 만한 것을 버튼으로 둔다.
+const GIPHY = [
+  ["별하늘", "https://media.giphy.com/media/3o7btPCcdNniyf0ArS/giphy.gif"],
+  ["네온",   "https://media.giphy.com/media/l0HlQXlQ3nHyLMvte/giphy.gif"],
+  ["파도",   "https://media.giphy.com/media/26tn33aiTi1jkl6H6/giphy.gif"],
+  ["불꽃",   "https://media.giphy.com/media/l0HlKrB02QY0f1mbm/giphy.gif"],
+];
+
+$("giphyPicks").innerHTML = GIPHY.map(([n, u]) =>
+  `<button class="giphy" data-url="${u}">${n}</button>`).join("");
+document.querySelectorAll("#giphyPicks .giphy").forEach(b => {
+  b.onclick = () => sendKraken({video_url: b.dataset.url, lcd_mode: "video",
+                                video_audio: false});
+});
+
+document.querySelectorAll("#lcdPanel [data-lcd]").forEach(b => {
+  b.onclick = () => sendKraken({lcd_mode: b.dataset.lcd});
+});
+$("videoUrl2").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") sendKraken({video_url: $("videoUrl2").value, lcd_mode: "video"});
+});
+$("videoAudio2").onchange = () => sendKraken({video_audio: $("videoAudio2").checked});
+$("mirrorBox2").addEventListener("pointerdown", () => dragging = true);
+$("mirrorBox2").addEventListener("pointerup", () => dragging = false);
+$("mirrorBox2").oninput = () => {
+  $("mirrorBoxVal2").textContent = $("mirrorBox2").value;
+  sendKraken({mirror_box: $("mirrorBox2").value});
+};
+
+function renderLcdPanel(k) {
+  if (!k) return;
+  const st = k.state || {};
+  document.querySelectorAll("#lcdPanel [data-lcd]").forEach(b =>
+    b.classList.toggle("on", b.dataset.lcd === st.lcd_mode));
+  if (!dragging) {
+    $("mirrorBox2").value = st.mirror_box;
+    $("mirrorBoxVal2").textContent = st.mirror_box;
+    if (document.activeElement !== $("videoUrl2")) $("videoUrl2").value = st.video_url || "";
+    $("videoAudio2").checked = st.video_audio;
+  }
+  let note = k.ok ? `초당 ${k.lcd_fps}장` : "크라켄 못 붙음";
+  if (st.lcd_mode === "video") {
+    if (k.video_error) note = "실패: " + k.video_error;
+    else if (k.video_playing) {
+      const n = (k.video_total > 1) ? ` [${k.video_index}/${k.video_total}]` : "";
+      note = `▶ ${k.video_title}${n}  (초당 ${k.lcd_fps}장)`;
+    } else note = "준비 중...";
+  }
+  $("lcdNote").textContent = note;
+}
+
+function paint(el, color) {
+  // 링은 선으로, 나머지는 면으로 칠한다.
+  if (el.classList.contains("ring")) el.style.stroke = color;
+  else el.style.fill = color;
+}
+
+// 켜진 부품은 빛나 보이게. 색만 칠하면 도면 같고, 빛이 있어야 조명처럼 보인다.
+function glow(el, color, strength) {
+  el.style.filter = `drop-shadow(0 0 ${strength}px ${color})`;
+}
+
+function renderParts(p, zones) {
+  if (!p) return;
+  FAN_SPOTS.forEach(spot => {
+    const slot = p.map[spot];
+    const port = slot ? parseInt(slot[1], 10) : 0;
+    [["in", 0], ["out", 1]].forEach(([tag, r]) => {
+      const el = document.querySelector(`#caseView [data-part="${spot}#${tag}"]`);
+      if (!el) return;
+      const fixed = p.colors[spot + "#" + tag] || p.colors[spot];
+      const z = zones && zones[port * 2 + r];
+      const col = fixed ? "#" + fixed : (z ? z.hex : "#39445a");
+      paint(el, col);
+      glow(el, col, tag === "out" ? 6 : 4);
+      el.classList.toggle("off", !!p.finding && p.finding !== spot);
+    });
+  });
+  ["ram","gpu","speaker"].forEach(id => {
+    const g = document.querySelector(`#caseView [data-part="${id}"]`);
+    if (!g) return;
+    const fixed = p.colors[id];
+    const col = fixed ? "#" + fixed : (zones && zones[0] ? zones[0].hex : "#1b2029");
+    g.querySelectorAll("rect,circle").forEach(el => el.style.fill = col);
+    // 글카는 몸통이 아니라 물결 라인만 빛난다. 실물이 그렇다.
+    const wave = g.querySelector(".gpuwave");
+    if (wave) {
+      g.querySelectorAll("rect").forEach(el => el.style.fill = "#161b23");
+      wave.style.stroke = col;
+      glow(wave, col, 7);
+    } else {
+      glow(g, col, 5);
+    }
+  });
+  if (selPart) {
+    const base = selPart.split("#")[0];
+    if (p.map[base]) $("slotName").textContent = p.map[base];
+  }
+}
+
+// LCD 원 안에 지금 화면이 뭘 하고 있는지 비춘다. 실제 화면을 가져올 수는
+// 없으니 모드에 맞는 색과 글자로 대신한다.
+function renderLcdIcon(k) {
+  const g = document.querySelector('#caseView [data-part="lcd"]');
+  if (!g || !k) return;
+  const st = k.state || {};
+  const inner = g.querySelectorAll("circle")[1];
+  const txt = g.querySelector(".lbl2");
+  if (!k.ok) { inner.style.fill = "#12161d"; txt.textContent = "꺼짐"; return; }
+  const view = {
+    sync: ["동기화", null], stats: ["상태판", "#1b2a3a"],
+    mirror: ["모니터", "#22303f"], video: ["▶", "#2a1f2f"],
+    spin: ["진단", "#20262f"], off: ["끔", "#12161d"],
+  }[st.lcd_mode] || ["-", "#12161d"];
+  // 조명과 같은 색 모드일 때는 실제로 그 색이 화면에 뜨므로 그대로 보여준다.
+  const zones = window.__zones || [];
+  inner.style.fill = view[1] || (zones[0] ? zones[0].hex : "#12161d");
+  txt.textContent = view[0];
+}
+
+function renderFans(zones) {
+  const box = $("fans");
+  if (box.children.length !== zones.length) {
+    box.innerHTML = zones.map(z =>
+      `<div class="fan" data-z="${z.zone}"><div class="ring"></div><span></span></div>`
+    ).join("");
+  }
+  zones.forEach(z => {
+    const el = box.querySelector(`[data-z="${z.zone}"]`);
+    el.classList.toggle("dead", z.dead);
+    const ring = el.querySelector(".ring");
+    ring.style.backgroundColor = z.hex;
+    ring.style.boxShadow = z.dead ? "none" : `0 0 14px ${z.hex}`;
+    el.querySelector("span").textContent = z.dead ? `${z.zone} 불량` : z.zone;
+  });
+}
+
+function renderDevices(devices, synced) {
+  $("devs").innerHTML = devices.map(d => {
+    const isSync = synced.includes(d.name);
+    const tag = isSync ? `<span class="tag sync">동기화</span>`
+      : (d.type === "COOLER" ? `<span class="tag sync">팬</span>` : `<span class="tag">대기</span>`);
+    return `<tr><td>${d.name}</td><td style="color:var(--dim)">${d.type}</td>
+            <td class="n">${d.leds}</td><td style="text-align:right">${tag}</td></tr>`;
+  }).join("");
+}
+
+async function tick() {
+  try {
+    const r = await fetch("/api/state");
+    const s = await r.json();
+
+    $("dot").classList.toggle("on", s.connected);
+    $("statusText").textContent = s.connected ? "연결됨" : "끊김";
+    $("err").textContent = s.error ? `오류: ${s.error}` : "";
+
+    renderFans(s.zones);
+    renderParts(s.parts, s.zones);
+    window.__zones = s.zones;
+    renderLcdPanel(s.kraken);
+    renderLcdIcon(s.kraken);
+    renderDevices(s.devices, s.synced);
+
+    const cpu = s.cpu || {};
+    $("cpuLabel").textContent = cpu.temp != null ? "CPU 온도" : "CPU 사용률";
+    $("cpuVal").textContent = cpu.temp != null
+      ? `${cpu.temp}°C`
+      : `${(cpu.util ?? 0).toFixed(0)}%` + (cpu.freq ? `  ${cpu.freq}GHz` : "");
+    $("cpuBar").style.width = (cpu.temp != null ? cpu.temp : (cpu.util ?? 0)) + "%";
+
+    const gpu = s.gpu;
+    if (gpu) {
+      $("gpuLabel").textContent = gpu.name;
+      $("gpuVal").textContent = `${gpu.temp}°C   부하 ${gpu.util}%`;
+      $("gpuBar").style.width = gpu.temp + "%";
+    } else {
+      $("gpuLabel").textContent = "GPU";
+      $("gpuVal").textContent = "읽을 수 없음";
+      $("gpuBar").style.width = "0%";
+    }
+
+    document.querySelectorAll(MODE_BUTTONS).forEach(b =>
+      b.classList.toggle("on", b.dataset.mode === s.state.mode));
+    renderAudio(s.audio, s.state.mode);
+    renderKraken(s.kraken);
+    if (!dragging) {
+      $("speed").value = s.state.speed;
+      $("speedVal").textContent = (+s.state.speed).toFixed(1);
+    }
+    if (document.activeElement !== $("color")) $("color").value = "#" + s.state.color;
+    $("sync").checked = s.state.sync_all;
+    $("syncRam").checked = s.state.sync_ram;
+    $("syncSolid").checked = s.state.sync_solid;
+  } catch (e) {
+    $("dot").classList.remove("on");
+    $("statusText").textContent = "서버 응답 없음";
+  }
+}
+
+const SOUND_MODES = ["pulse", "vu", "spectrum"];
+let audioTimer = null;
+
+function drawAudio(a) {
+  $("audioBar").style.width = (a.level * 100).toFixed(0) + "%";
+  const b = a.bands || {};
+  // 대역은 서로의 비율(합 1)이라 그대로 %로 쓰면 33% 근처에서만 논다.
+  // 세 배로 늘려 눈에 보이게 편다.
+  $("bandLow").style.width  = Math.min(100, (b.low  || 0) * 300).toFixed(0) + "%";
+  $("bandMid").style.width  = Math.min(100, (b.mid  || 0) * 300).toFixed(0) + "%";
+  $("bandHigh").style.width = Math.min(100, (b.high || 0) * 300).toFixed(0) + "%";
+}
+
+function renderAudio(a, mode) {
+  const active = SOUND_MODES.includes(mode);
+  $("audioBox").classList.toggle("show", active);
+  if (!active) {
+    if (audioTimer) { clearInterval(audioTimer); audioTimer = null; }
+    return;
+  }
+  a = a || {};
+  if (a.running && !a.ok) {
+    $("audioLabel").textContent = "소리를 못 읽음";
+    $("audioVal").textContent = a.error || "";
+  } else {
+    $("audioLabel").textContent = "스피커로 나가는 소리";
+    $("audioVal").textContent = a.running ? "" : "시작하는 중";
+  }
+  // 500ms 폴링으로는 박자가 안 보인다. 소리 모드일 때만 따로 빨리 읽는다.
+  if (!audioTimer) {
+    audioTimer = setInterval(async () => {
+      try { drawAudio(await (await fetch("/api/audio")).json()); } catch (e) {}
+    }, 60);
+  }
+}
+
+tick();
+setInterval(tick, 500);
+</script>
+</body>
+</html>

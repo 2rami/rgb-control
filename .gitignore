@@ -1,0 +1,50 @@
+# git 은 줄 끝 주석을 지원하지 않는다.
+# "cookies.txt  # 설명" 이라고 쓰면 그 설명까지 파일 이름의 일부로 읽는다.
+# 그래서 설명은 반드시 따로 줄을 잡아야 한다.
+
+# --- 개인 정보. 절대 올리지 않는다 ---
+# 유튜브 로그인 쿠키. 올라가면 계정이 통째로 털린다
+cookies.txt
+# 내 케이스의 팬 배치. 사람마다 다르다
+layout.json
+# 내 컴퓨터의 프로그램 경로
+vendor_autostart_backup.json
+# 작업 기록. 개인 경로와 시스템 정보가 가득하다
+RESTORE_INFO.txt
+RMA_문의내용.md
+
+# --- 남의 저작물 ---
+# NZXT CAM 원본 복사본(147MB). 올릴 권리가 없다
+app.asar.backup
+
+# --- 빌드 결과물. 각자 만들어야 한다 ---
+*.whl
+__pycache__/
+*.pyc
+
+# --- 로그·찌꺼기 ---
+*.log
+disable_result.txt
+patch_result.txt
+*.kasabak
+bench.txt
+probe.out
+
+# --- 시험하다 남은 그림들 ---
+test_*.png
+test_*.gif
+lcd_*.gif
+lcd_*.png
+lcdtest.*
+one_*.gif
+spd_*.png
+check.gif
+
+# --- 배포하면 안 되는 것 ---
+# AIOLCDUnchained 의 driver.py 복사본. 참고용으로 받아 뒀을 뿐 남의 코드다
+_ref_driver.py
+# NZXT CAM 의 실행 파일을 고치는 도구.
+# 남의 프로그램 바이너리를 고치는 것이라 배포하지 않는다.
+# (내 컴퓨터에서 쓰는 것은 그대로 두고, 레포에만 안 올린다)
+patch_cam_audio.py
+patch_audio.bat

@@ -1,0 +1,28 @@
+# 웹 대시보드
+flask
+
+# 조명 (OpenRGB 서버에 붙는다)
+openrgb-python
+
+# 수랭 쿨러 · LCD
+liquidctl
+pyusb
+libusb-package
+
+# 그림 만들기 · 화면 캡처
+pillow
+mss
+numpy
+
+# 소리 반응 조명 (스피커 루프백)
+soundcard
+
+# 시스템 정보
+psutil
+
+# LCD 영상 (ffmpeg / ffplay 도 따로 필요하다)
+yt-dlp
+
+# LCD 빠른 경로에 필요한 Q565 압축기는 pip 에 없다.
+# README 의 "Q565 압축기" 항목을 보고 직접 빌드해야 한다.
+#   q565_rust

@@ -202,7 +202,10 @@ class Player:
     여기가 병목이 되지 않도록 30 으로 둔다.
     """
 
-    def __init__(self, url, fps=30, audio=True):
+    def __init__(self, url, fps=30, audio=True, items=None):
+        # items 를 주면 그것을 그대로 튼다(대시보드의 재생목록).
+        # 안 주면 url 이 재생목록인지 보고 알아서 펼친다(유튜브 믹스 등).
+        self.items = list(items) if items else None
         self.url = url
         self.fps = fps
         self.want_audio = audio
@@ -212,6 +215,8 @@ class Player:
         self.frames = 0
         self.index = 0      # 지금 몇 번째 곡인지
         self.total = 1
+        # 곡 제목을 알아내면 이걸 부른다. 재생목록이 제목을 채우는 데 쓴다.
+        self.on_title = None
 
         self._img = None
         self._lock = threading.Lock()
@@ -219,6 +224,11 @@ class Player:
         self._vproc = None
         self._aproc = None
         self._thread = None
+        # ★띄운 프로세스를 전부 여기에 모은다.
+        # _vproc/_aproc 만 들고 있으면, 곡을 넘기는 사이에 멈춤이 오면
+        # "그때는 죽일 게 없었고 그 뒤에 태어난 것"은 아무도 안 죽인다.
+        # 실제로 그렇게 ffplay 가 둘 남아 소리가 겹쳤다.
+        self._procs = []
 
     def start(self):
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -226,13 +236,40 @@ class Player:
         return self
 
     def stop(self):
+        """멈춘다. 여러 번 불러도 안전하다."""
         self._stop.set()
-        for p in (self._vproc, self._aproc):
-            if p and p.poll() is None:
-                try:
+        self._kill_all()
+
+    def _kill_all(self):
+        with self._lock:
+            procs, self._procs = list(self._procs), []
+        for p in procs:
+            try:
+                if p.poll() is None:
                     p.kill()
-                except Exception:
-                    pass
+            except Exception:
+                pass
+        self._vproc = self._aproc = None
+
+    def _spawn(self, cmd, **kw):
+        """프로세스를 띄우고 목록에 넣는다.
+
+        ★띄우기 직전에 멈춤을 한 번 더 본다. 주소를 푸는 데 몇 초 걸리는데
+        그 사이에 멈춤이 올 수 있다. 확인 안 하면 멈춘 뒤에 새로 태어난다.
+        """
+        if self._stop.is_set():
+            return None
+        pr = subprocess.Popen(cmd, creationflags=CREATE_NO_WINDOW,
+                              startupinfo=hidden(), **kw)
+        with self._lock:
+            self._procs.append(pr)
+        if self._stop.is_set():      # 띄우는 사이에 왔을 수도 있다
+            try:
+                pr.kill()
+            except Exception:
+                pass
+            return None
+        return pr
 
     def latest(self):
         """가장 최근 한 장. 아직 없으면 None."""
@@ -242,7 +279,7 @@ class Player:
     def _run(self):
         """재생목록이면 한 곡씩 이어서 튼다. 끝나면 처음으로 돌아간다."""
         try:
-            items = playlist_items(self.url)
+            items = self.items or playlist_items(self.url)
         except Exception as e:
             self.error = f"목록을 못 읽었다: {e}"
             self.done = True
@@ -256,18 +293,29 @@ class Player:
                 self._play_one(items[idx])
             except Exception as e:
                 self.error = f"재생 실패: {e}"
-            idx = (idx + 1) % len(items)
-            if len(items) == 1 and self._stop.is_set():
+            if self._stop.is_set():
                 break
+            idx = (idx + 1) % len(items)
+        self._kill_all()      # 남은 것이 없게 한 번 더
         self.done = True
 
     def _play_one(self, one):
+        if self._stop.is_set():
+            return
         try:
             stream, title = resolve(one)
             self.title = title
+            if self.on_title:
+                try:
+                    self.on_title(one, title)
+                except Exception:
+                    pass
         except Exception as e:
             self.error = f"주소를 못 풀었다: {e}"
             time.sleep(2)
+            return
+        # 주소 푸는 데 몇 초 걸린다. 그 사이에 멈춤이 왔을 수 있다.
+        if self._stop.is_set():
             return
 
         # 화면을 꽉 채운다. 16:9 영상이면 좌우가 잘리지만, 둥근 화면에
@@ -283,21 +331,21 @@ class Player:
             # ★stderr 를 버리면 안 된다. ffmpeg 가 주소를 못 열거나 형식을
             # 거부해도 조용히 아무것도 안 뱉을 뿐이라, 왜 화면이 안 나오는지
             # 알 길이 없어진다. 실제로 한 번 이것 때문에 헤맸다.
-            self._vproc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                creationflags=CREATE_NO_WINDOW, startupinfo=hidden())
+            self._vproc = self._spawn(cmd, stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE)
         except FileNotFoundError:
             self.error = "ffmpeg 를 못 찾았다 (PATH 에 없음)"
             self.done = True
             return
+        if self._vproc is None:
+            return                    # 그 사이에 멈춤이 왔다
         threading.Thread(target=self._watch_errors, daemon=True).start()
 
         if self.want_audio:
             try:
-                self._aproc = subprocess.Popen(
+                self._aproc = self._spawn(
                     ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", stream],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    creationflags=CREATE_NO_WINDOW, startupinfo=hidden())
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except FileNotFoundError:
                 pass   # 소리는 없어도 영상은 나온다
 
@@ -314,13 +362,8 @@ class Player:
             self.frames += 1
 
         # 한 곡이 끝난 것뿐이다. 다음 곡은 _run 이 이어서 튼다.
-        for pr in (self._vproc, self._aproc):
-            if pr and pr.poll() is None:
-                try:
-                    pr.kill()
-                except Exception:
-                    pass
-        self._vproc = self._aproc = None
+        # 소리(ffplay)는 영상보다 늦게 끝나는 일이 잦아서 반드시 같이 죽인다.
+        self._kill_all()
 
 
     def _watch_errors(self):

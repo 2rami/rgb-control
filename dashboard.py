@@ -27,6 +27,9 @@ import lcd_monitor as lm
 import video as vid
 import cookies_setup
 import parts as parts_mod
+import playlists as pl_mod
+import display as display_mod
+import settings as settings_mod
 
 app = Flask(__name__)
 # 화면(templates)을 고치면 새로고침만으로 보이게 한다. 기본값은 캐시라
@@ -79,9 +82,14 @@ BLOCKED = ("Candy companion chip",)
 RAM_TYPES = ("DRAM",)
 
 state = {
+    # 모니터가 꺼지면 조명을 끌지. 끄더라도 설정은 그대로 두고 색만 검게
+    # 칠하므로, 화면이 켜지면 저절로 돌아온다.
+    "off_with_monitor": True,
     # 켜자마자 흰색-하늘색 고정 배치로 뜨게 한다. 불량 팬이 파랑 성분을
     # 못 견뎌 테두리를 꺼둔 상태라, 색이 도는 효과보다 이쪽이 깔끔하다.
     "mode": "ice",
+    # 조명을 껐다가 다시 켤 때 돌아갈 효과. mode 가 "off" 가 되는 순간 적힌다.
+    "resume_mode": "ice",
     "speed": 1.0,
     "color": "9bd7ff",
     "sync_all": True,
@@ -102,7 +110,29 @@ kraken_state = {
     "mirror_box": 640,
     "video_url": "",
     "video_audio": True,
+    "play_list": None,      # 고른 재생목록 id. None 이면 주소칸을 쓴다
+    # 모니터가 꺼질 때 LCD 도 같이 끌 것인가. 조명과 따로 고른다 - 케이스가
+    # 책상 위에 있으면 화면을 끈 뒤에도 수온 정도는 보고 싶을 수 있다.
+    "lcd_off_with_monitor": True,
 }
+
+
+def remember():
+    """지금 설정을 적어 둔다. 바꾸는 곳마다 부른다.
+
+    ★반드시 lock 을 놓은 뒤에 불러라. 파일 쓰기는 느려서, 잠근 채로 하면
+    조명을 그리는 스레드가 그동안 멈춰 선다.
+    """
+    settings_mod.save(state, kraken_state)
+
+
+def restore():
+    """적어 둔 설정을 되돌린다. 없으면 기본값 그대로 둔다."""
+    light, kraken = settings_mod.load()
+    with lock:
+        state.update(light)
+        kraken_state.update(kraken)
+    return light, kraken
 
 snapshot = {
     "connected": False,
@@ -131,6 +161,29 @@ lock = threading.Lock()
 
 # 케이스 그림에서 부품 하나만 다른 색으로 바꾸거나, 어느 팬인지 찾을 때 쓴다.
 parts = parts_mod.Parts()
+
+# 이름 붙인 재생목록과 대기열.
+playlists = pl_mod.Playlists()
+
+# 모니터가 꺼지면 조명도 끈다. 보는 사람이 없는데 방을 밝힐 이유가 없고,
+# 잘 때 눈부시다. 켜지면 원래대로 돌아온다.
+monitor = None
+
+
+BLACK = RGBColor(0, 0, 0)
+
+
+def dark_now():
+    """지금 조명을 꺼야 하는가. 모니터가 꺼져 있고 그렇게 하기로 했으면 True.
+
+    감시가 아예 안 붙었으면 늘 False 다. 모르는 것을 근거로 조명을 꺼 버리면
+    "왜 안 켜지지"가 되기 때문이다.
+    """
+    if monitor is None or not monitor.ok:
+        return False
+    with lock:
+        want = state["off_with_monitor"]
+    return want and not monitor.is_on()
 
 
 def collect_devices(cli):
@@ -230,6 +283,16 @@ def paint_targets(targets, colors, prepared, failed, solid=True):
     한 번 실패한 장치는 failed에 넣고 다시 건드리지 않는다. 말썽인 장치 하나가
     OpenRGB 전체를 끌어내리는 걸 막기 위해서다.
     """
+    if dark_now():
+        # 화면이 꺼졌으면 램·글카·스피커도 같이 끈다.
+        for d in targets:
+            if prepare_device(d, prepared, failed):
+                try:
+                    d.set_colors([BLACK] * len(d.leds))
+                except Exception:
+                    failed.add(d.id)
+        return
+
     src = live_colors(colors)
     if not src:
         return
@@ -278,6 +341,10 @@ def zone_swatches(colors, zones):
 
 
 def make_frames(mode, n, speed, color):
+    if mode == "off":
+        # 검은 화면을 계속 낸다. 반복문을 멈추지 않는 이유는 dark_now 와 같다 -
+        # 멈췄다 다시 시작하면 색이 튄다. 그냥 검은색을 계속 그린다.
+        return effects.static(n, RGBColor(0, 0, 0))
     if mode == "rainbow":
         return effects.rainbow(n, speed)
     if mode == "breathe":
@@ -307,6 +374,7 @@ def run_effect(hub, safe, ram):
     key = None
     frames = None
     tick = 0
+    was_dark = None      # 아직 모른다. 첫 회에 한 번 맞추게 된다
     failed = set()
     prepared = {d.id for d in safe}  # safe는 sync_targets에서 이미 준비됐다.
 
@@ -334,10 +402,22 @@ def run_effect(hub, safe, ram):
         # 부품 색이 꺼둔 링을 다시 켜 버린다.
         colors = parts.apply_fans(next(frames))
         colors = fan.mute_dead(colors)
+
+        # ★화면이 꺼져 있으면 전부 검게. 효과는 계속 돌려 둔다 - 멈췄다가
+        # 다시 시작하면 색이 튀기 때문이다. 마지막에 덮어쓰기만 한다.
+        dark = dark_now()
+        if dark:
+            colors = [BLACK] * len(colors)
+
         hub.set_colors(colors)
 
         tick += 1
-        if sync and tick % SYNC_EVERY == 0:
+        # ★꺼지거나 켜지는 순간에는 차례를 기다리지 않고 그 자리에서 맞춘다.
+        # 램·글카·스피커는 스무 번에 한 번만 갱신하는데, 그대로 두면 팬만
+        # 먼저 꺼지고 나머지가 뒤늦게 따라 꺼져 우수수 꺼지는 것처럼 보인다.
+        flipped = dark != was_dark
+        was_dark = dark
+        if sync and (flipped or tick % SYNC_EVERY == 0):
             paint_targets(safe + (ram if use_ram else []), colors,
                           prepared, failed, solid)
 
@@ -354,21 +434,31 @@ _player = {"obj": None, "url": None}
 
 
 def video_frame():
-    """지금 틀어야 할 영상의 최신 한 장. 없으면 None."""
+    """지금 틀어야 할 영상의 최신 한 장. 없으면 None.
+
+    재생목록을 골랐으면 그 목록을, 아니면 주소칸에 넣은 것을 튼다.
+    """
     with lock:
         url = kraken_state["video_url"].strip()
         audio = kraken_state["video_audio"]
+        list_id = kraken_state.get("play_list") or None
+
+    items = playlists.urls_of(list_id) if list_id else None
+    key = f"list:{list_id}:{len(items or [])}" if list_id else url
 
     cur = _player["obj"]
-    if not url:
+    if not key or (list_id and not items):
         stop_video()
         return None
 
-    if cur is None or _player["url"] != url or cur.done:
+    if cur is None or _player["url"] != key or cur.done:
         stop_video()
-        cur = vid.Player(url, audio=audio).start()
-        _player.update(obj=cur, url=url)
-        say(f"영상 시작: {url}")
+        cur = vid.Player(items[0] if items else url, audio=audio, items=items)
+        # 제목은 곡을 열어야 알 수 있다. 알아내는 대로 목록에 채워 넣는다.
+        cur.on_title = playlists.note_title
+        cur.start()
+        _player.update(obj=cur, url=key)
+        say(f"영상 시작: {key}")
 
     with lock:
         snapshot["video_title"] = cur.title
@@ -379,13 +469,61 @@ def video_frame():
     return cur.latest()
 
 
+# 우리가 띄우는 미디어 프로그램. 이름으로 알아본다.
+MEDIA_NAMES = ("ffplay.exe", "ffmpeg.exe", "ffplay", "ffmpeg")
+
+
+def sweep_media(reason=""):
+    """우리 밑에 남은 ffplay/ffmpeg 를 전부 정리한다.
+
+    ★재생기 객체가 자기 프로세스를 추적하지만, 그 객체를 놓치는 순간
+    (예외로 죽거나, 교체되거나, 경쟁 상태로 늦게 태어나거나) 그 프로세스는
+    영영 아무도 안 죽인다. 실제로 그렇게 남은 ffplay 가 계속 소리를 냈다.
+
+    개별 추적은 언제든 샌다. 그래서 "내 자식 중에 미디어 프로그램이 있는데
+    지금 영상을 트는 중이 아니면 죽인다"는 그물을 따로 친다. 이건 안 샌다.
+    """
+    killed = []
+    try:
+        me = psutil.Process()
+        for child in me.children(recursive=True):
+            try:
+                if child.name() in MEDIA_NAMES:
+                    child.kill()
+                    killed.append(child.pid)
+            except Exception:
+                pass
+    except Exception:
+        return 0
+    if killed:
+        say(f"남은 소리·영상 프로그램 {len(killed)}개 정리 {reason}".strip())
+    return len(killed)
+
+
 def stop_video():
-    if _player["obj"] is not None:
+    """지금 틀던 것을 확실히 끊는다.
+
+    ★멈춘 뒤에도 유령이 남을 수 있다. 곡 주소를 푸는 데 몇 초 걸리는데
+    그 사이에 멈춤이 오면, 멈출 당시에는 죽일 대상이 없었고 그 뒤에 새
+    프로세스가 태어난다. 그래서 잠깐 기다렸다 한 번 더 죽인다.
+    """
+    cur = _player["obj"]
+    _player.update(obj=None, url=None)
+    if cur is not None:
         try:
-            _player["obj"].stop()
+            cur.stop()
         except Exception:
             pass
-    _player.update(obj=None, url=None)
+
+        def sweep():
+            time.sleep(6.0)      # 주소 푸는 시간보다 넉넉히
+            try:
+                cur.stop()
+            except Exception:
+                pass
+            sweep_media("(늦게 태어난 것)")
+
+        threading.Thread(target=sweep, daemon=True).start()
     with lock:
         snapshot["video_playing"] = False
 
@@ -404,6 +542,11 @@ def stop_video():
 _ready = {"data": None}
 _ready_lock = threading.Lock()
 _orientation = {"v": 0}
+
+# 대시보드에 "지금 LCD 에 뭐가 나오나"를 보여주려고 마지막 그림을 들고 있는다.
+# ★돌리기(fit) 전 그림을 둔다. fit 은 패널이 비뚤게 달린 것을 보정하려고
+# 미리 돌려 놓는 것이라, 그걸 그대로 보여주면 화면에서는 누워 보인다.
+_preview = {"img": None}
 
 
 def take_frame():
@@ -454,6 +597,7 @@ def frame_producer():
             else:
                 img = lm.draw_stats()
 
+            _preview["img"] = img
             fitted = L.fit(img, _orientation["v"])
             # 움직이는 화면은 디더를 안 쓴다. 디더가 압축을 깨서 데이터가
             # 두세 배로 불고 그만큼 느려지는데, 움직이면 띠는 잘 안 보인다.
@@ -511,8 +655,17 @@ def kraken_once(k, mirror_sct):
     with lock:
         lcd_mode = kraken_state["lcd_mode"]
         box = kraken_state["mirror_box"]
+        lcd_sleeps = kraken_state["lcd_off_with_monitor"]
 
-    if lcd_mode == "off":
+    # 영상을 트는 중이 아닌데 소리가 나면 안 된다. 몇 초에 한 번 확인한다.
+    now2 = time.time()
+    if lcd_mode != "video" and now2 - kraken_once.last_sweep > 4.0:
+        kraken_once.last_sweep = now2
+        sweep_media("(영상 모드가 아님)")
+
+    if lcd_mode == "off" or (lcd_sleeps and dark_now()):
+        # 모니터가 꺼졌으면 LCD 도 쉰다. 아무도 안 보는데 초당 서른 장을
+        # 보낼 이유가 없다. 다만 그렇게 할지는 따로 고를 수 있다.
         stop_video()
         return 1.0        # 화면은 장치 기본 그대로 둔다
 
@@ -531,6 +684,7 @@ kraken_once.last_poll = 0.0
 kraken_once.last_pump = None
 kraken_once.bad_reads = 0
 kraken_once.sent = 0
+kraken_once.last_sweep = 0.0
 
 
 def kraken_loop():
@@ -672,7 +826,9 @@ def api_state():
         "cpu": cpu_stats(),
         "gpu": gpu_stats(),
         "audio": effects.audio_status(),
+        "monitor": monitor.snapshot() if monitor else {"ok": False, "on": True},
         "parts": parts.snapshot(),
+        "playlists": playlists.snapshot(),
         "kraken": {
             "state": dict(kraken_state),
             "ok": snap["kraken_ok"],
@@ -716,18 +872,88 @@ def api_kraken():
                 max(kr.PUMP_FLOOR, min(kr.PUMP_CEIL, float(data["pump_duty"]))))
         if "video_url" in data:
             kraken_state["video_url"] = str(data["video_url"]).strip()
+            kraken_state["play_list"] = None    # 주소를 직접 넣으면 목록은 푼다
+        if "play_list" in data:
+            kraken_state["play_list"] = data["play_list"] or None
         if "video_audio" in data:
             kraken_state["video_audio"] = bool(data["video_audio"])
         if "lcd_mode" in data and data["lcd_mode"] in ("off", "stats", "sync", "mirror", "video", "spin"):
             kraken_state["lcd_mode"] = data["lcd_mode"]
         if "mirror_box" in data:
             kraken_state["mirror_box"] = int(max(200, min(1440, int(data["mirror_box"]))))
+        if "lcd_off_with_monitor" in data:
+            kraken_state["lcd_off_with_monitor"] = bool(data["lcd_off_with_monitor"])
         st = dict(kraken_state)
+    remember()
     # 손으로 정한 값은 다음 한 바퀴를 기다리지 말고 바로 반영되게 한다.
     kraken_once.last_pump = None
-    if "video_url" in data or data.get("lcd_mode") not in (None, "video"):
+    if ("video_url" in data or "play_list" in data
+            or data.get("lcd_mode") not in (None, "video")):
         stop_video()
     return jsonify({"ok": True, "state": st})
+
+
+@app.route("/api/playlist", methods=["POST"])
+def api_playlist():
+    """재생목록을 만들고 고친다.
+
+    {"action":"create","name":"작업용"}
+    {"action":"rename","id":...,"name":...}   {"action":"delete","id":...}
+    {"action":"add","id":"queue"|목록id,"url":...}
+    {"action":"remove","id":...,"index":0}    {"action":"move","id":...,"index":0,"step":-1}
+    {"action":"clear_queue"}                  {"action":"play","id":...}
+    """
+    d = request.get_json(force=True, silent=True) or {}
+    act = d.get("action")
+    lid = d.get("id")
+    with lock:
+        if act == "create":
+            _, msg = playlists.create(d.get("name"))
+        elif act == "rename":
+            _, msg = playlists.rename(lid, d.get("name"))
+        elif act == "delete":
+            _, msg = playlists.delete(lid)
+        elif act == "add":
+            _, msg = playlists.add(lid, d.get("url"), d.get("title"))
+        elif act == "remove":
+            _, msg = playlists.remove(lid, int(d.get("index", -1)))
+        elif act == "move":
+            _, msg = playlists.move(lid, int(d.get("index", -1)), int(d.get("step", 0)))
+        elif act == "clear_queue":
+            _, msg = playlists.clear_queue()
+        elif act == "play":
+            playlists.set_playing(lid)
+            kraken_state["play_list"] = lid
+            kraken_state["lcd_mode"] = "video"
+            msg = "재생 시작"
+        else:
+            return jsonify({"ok": False, "message": "무슨 동작인지 모르겠어"})
+    if act == "play":
+        stop_video()
+    return jsonify({"ok": True, "message": msg, "playlists": playlists.snapshot()})
+
+
+@app.route("/api/lcd.jpg")
+def api_lcd_preview():
+    """지금 LCD 에 나가는 그림을 작게 줄여서 준다.
+
+    매 프레임 만들지 않고 물어볼 때만 만든다. 대시보드는 초당 몇 번만
+    가져가므로, 화면 보내는 일에 부담을 주지 않는다.
+    """
+    import io as _io
+
+    img = _preview["img"]
+    if img is None:
+        return ("", 204)
+    try:
+        small = img.convert("RGB").resize((220, 220))
+        buf = _io.BytesIO()
+        small.save(buf, format="JPEG", quality=72)
+        return app.response_class(
+            buf.getvalue(), mimetype="image/jpeg",
+            headers={"Cache-Control": "no-store"})
+    except Exception:
+        return ("", 204)
 
 
 @app.route("/api/part", methods=["POST"])
@@ -791,7 +1017,13 @@ def api_effect():
     data = request.get_json(force=True, silent=True) or {}
     with lock:
         if "mode" in data:
-            state["mode"] = str(data["mode"])
+            want = str(data["mode"])
+            # 끄기 직전에 뭘 켜고 있었는지 적어 둔다. 트레이의 "조명 켜기"가
+            # 이걸 보고 원래 효과로 돌아간다. 안 그러면 켤 때마다 기본값이
+            # 되어서, 껐다 켜는 것만으로 고른 효과가 날아간다.
+            if want == "off" and state["mode"] != "off":
+                state["resume_mode"] = state["mode"]
+            state["mode"] = want
         if "speed" in data:
             state["speed"] = max(0.1, min(5.0, float(data["speed"])))
         if "color" in data:
@@ -802,7 +1034,10 @@ def api_effect():
             state["sync_ram"] = bool(data["sync_ram"])
         if "sync_solid" in data:
             state["sync_solid"] = bool(data["sync_solid"])
+        if "off_with_monitor" in data:
+            state["off_with_monitor"] = bool(data["off_with_monitor"])
         st = dict(state)
+    remember()
     return jsonify({"ok": True, "state": st})
 
 
@@ -846,6 +1081,17 @@ def main():
     logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
     say("=== 대시보드 시작 ===" + ("" if sharpen_timer() else " (타이머 해상도 못 올림)"))
+
+    light, kr_saved = restore()
+    if light or kr_saved:
+        say(f"지난 설정 되돌림: {light.get('mode', '?')}"
+            f" #{light.get('color', '?')} / LCD {kr_saved.get('lcd_mode', '?')}")
+    else:
+        say("지난 설정이 없어 기본값으로 시작한다")
+
+    global monitor
+    monitor = display_mod.Monitor(
+        on_change=lambda on: say("모니터 " + ("켜짐" if on else "꺼짐 - 조명 끔"))).start()
 
     threading.Thread(target=effect_loop, daemon=True).start()
     threading.Thread(target=kraken_loop, daemon=True).start()

@@ -20,6 +20,9 @@ soundcard
 # 시스템 정보
 psutil
 
+# 트레이 아이콘
+pystray
+
 # LCD 영상 (ffmpeg / ffplay 도 따로 필요하다)
 yt-dlp
 

@@ -13,7 +13,9 @@
 # 로그가 무슨 일이 있었는지 말해주는 유일한 증거다.
 
 # 부팅 자동 시작에서는 브라우저를 안 띄운다. 손으로 켤 때만 띄운다.
-param([switch]$NoBrowser)
+# -PrepOnly: 준비만 하고 대시보드는 안 띄운다. 트레이가 주인일 때 쓴다 -
+# 트레이가 대시보드를 자기 자식으로 띄워야 끌 때 같이 끌 수 있다.
+param([switch]$NoBrowser, [switch]$PrepOnly)
 
 $ErrorActionPreference = 'Continue'
 $proj = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -74,6 +76,11 @@ try {
         Start-Sleep -Seconds 1
     }
     Write-Host "`r                    "
+
+    if ($PrepOnly) {
+        Say "=== 준비 완료 (대시보드는 트레이가 띄운다) ===" Green
+        return
+    }
 
     Say "[4/4] 대시보드 실행" Cyan
     # 이미 돌고 있으면 포트 5000을 못 잡고 조용히 죽는다. 먼저 정리한다.

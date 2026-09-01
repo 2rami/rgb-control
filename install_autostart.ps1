@@ -74,8 +74,14 @@ if ($saved.Count -gt 0) {
 }
 
 # --- 우리 것 등록 ---
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' `
-    -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$proj\start_all.ps1`" -NoBrowser" `
+# ★대시보드가 아니라 트레이를 띄운다. 트레이가 준비를 시키고 대시보드를
+# 자기 자식으로 띄운다. 그래야 "아이콘이 있다 = 켜져 있다" 가 성립하고,
+# 트레이를 끝내면 조명도 같이 꺼진다.
+# pythonw 는 검은 창을 안 만든다. 없으면 python 으로 떨어진다.
+$pyw = (Get-Command pythonw -ErrorAction SilentlyContinue).Source
+if (-not $pyw) { $pyw = (Get-Command python).Source }
+$action = New-ScheduledTaskAction -Execute $pyw `
+    -Argument "`"$proj\tray.py`"" `
     -WorkingDirectory $proj
 
 # 로그인 직후에는 장치가 아직 다 안 올라와 있다. 조금 기다렸다 시작한다.

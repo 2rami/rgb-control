@@ -149,6 +149,11 @@ snapshot = {
     "fan_rpm": None,
     "lcd_fps": 0.0,
     "kraken_bad_reads": 0,
+    # 마지막 상태 읽기에서 받은 것과, 믿을 만한 값을 마지막으로 읽은 때.
+    # kraken_ok·수온은 헛읽기가 이어져도 그대로 남아 몇 시간 묵은 값을 지금
+    # 값처럼 보여줬다. 언제 읽은 값인지 같이 내보낸다.
+    "kraken_last_read": {},
+    "kraken_status_at": None,
     "video_title": "",
     "video_error": "",
     "video_playing": False,
@@ -677,6 +682,8 @@ def kraken_once(k):
         # 건너뛰고 다음 차례(몇 초 뒤)에 다시 읽으면 된다 - 수온은 그렇게
         # 빨리 안 변한다. 화면이 매끄러운 게 더 중요하다.
         st = k.status()
+        with lock:
+            snapshot["kraken_last_read"] = dict(k.last_read)
         # 헛읽기면 이번 회차는 통째로 건너뛴다. 옛 값을 그대로 두는 게
         # 0도라는 거짓말을 믿고 펌프를 늦추는 것보다 안전하다.
         if st is None:
@@ -685,7 +692,7 @@ def kraken_once(k):
                 snapshot["kraken_bad_reads"] = kraken_once.bad_reads
             return 0.0
         with lock:
-            snapshot.update(kraken_ok=True, kraken_error="",
+            snapshot.update(kraken_ok=True, kraken_error="", kraken_status_at=time.time(),
                             liquid=st.get("liquid"),
                             pump_rpm=st.get("pump_rpm"),
                             pump_duty=st.get("pump_duty"),
@@ -885,6 +892,9 @@ def api_state():
             "fan_rpm": snap["fan_rpm"],
             "lcd_fps": round(snap["lcd_fps"], 1),
             "bad_reads": snap["kraken_bad_reads"],
+            "last_read": snap["kraken_last_read"],
+            "status_age": (round(time.time() - snap["kraken_status_at"], 1)
+                           if snap["kraken_status_at"] else None),
             "video_title": snap["video_title"],
             "video_error": snap["video_error"],
             "video_playing": snap["video_playing"],

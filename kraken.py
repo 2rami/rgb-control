@@ -20,6 +20,8 @@ import sys
 import threading
 import time
 
+from liquidctl.error import Timeout
+
 import owner
 import lcd
 import lcd_stream as L
@@ -38,8 +40,16 @@ DEFAULT_CURVE = [(35, 60), (45, 70), (50, 85), (55, 100)]
 POLL_SECONDS = 4.0
 
 # 이 범위를 벗어난 수온은 헛읽기로 보고 버린다. 물이 얼거나 끓지는 않는다.
+# ★위쪽은 끓는점이다. 80 으로 잡았을 때는, 상태 응답이 맞는데도 80 을 넘는
+# 수온을 헛읽기로 버려서 정말 뜨거워져도 아무도 못 보게 돼 있었다.
 LIQUID_MIN = 5.0
-LIQUID_MAX = 80.0
+LIQUID_MAX = 100.0
+
+# 상태 응답의 보고 번호. LCD 전송의 대답(ack)도 같은 HID 통로로 오는데, 늦게
+# 온 대답이 큐를 비운 뒤에 도착하면 liquidctl 은 그것을 상태로 읽는다(첫 장만
+# 보고 번호를 안 본다). 그 바이트가 수온·rpm 자리에 들어가 헛읽기가 된다.
+STATUS_REPLY = 0x75
+STATUS_READ_TRIES = 8
 
 # ★화면 보내는 속도 상한 - 이제 거의 쓸 일이 없다.
 #
@@ -89,6 +99,9 @@ class Kraken:
         self._last_show = 0.0
         self._min_gap = 1.0 / LCD_MAX_FPS
         self.fast = True
+        # 마지막 상태 읽기에서 실제로 받은 것. 버린 회차도 왜 버렸는지 남긴다 -
+        # 값이 없으면 "장치가 이상한지, 우리가 잘못 읽는지"를 가를 수 없다.
+        self.last_read = {}
 
     def __enter__(self):
         self.open()
@@ -128,29 +141,49 @@ class Kraken:
         실제로는 뜨거운데 펌프를 늦추는 것이라 위험하다.
         그래서 물리적으로 말이 되는 범위를 벗어나면 그 회차를 버린다.
         """
+        skipped = []
+        msg = None
         with self.lock:
-            raw = self.dev.get_status()
+            # liquidctl 의 get_status 와 같은 요청·같은 자리지만, 보고 번호가
+            # 상태인 것만 받는다. 앞에 낀 다른 대답은 건너뛴다.
+            self.dev.device.clear_enqueued_reports()
+            self.dev._write([0x74, 0x01])
+            try:
+                for _ in range(STATUS_READ_TRIES):
+                    m = self.dev._read()
+                    if m and m[0] == STATUS_REPLY:
+                        msg = m
+                        break
+                    skipped.append(bytes(m[:2]).hex(" ") if m else "-")
+            except Timeout:
+                # 대답이 5초 안에 안 온 것은 상태 한 번을 못 읽은 것뿐이다. 끊김으로
+                # 올려 보내면 바깥 루프가 장치를 닫았다 다시 열고 화면까지 끊는다.
+                skipped.append("5초 무응답")
             # 읽고 나서 바로 큰 덩어리를 밀어넣으면 통로가 엉킨다.
             time.sleep(SETTLE_AFTER_STATUS)
-        out = {}
-        for key, value, _unit in raw:
-            k = key.lower()
-            if "liquid" in k:
-                out["liquid"] = float(value)
-            elif "pump speed" in k:
-                out["pump_rpm"] = int(value)
-            elif "pump duty" in k:
-                out["pump_duty"] = int(value)
-            elif "fan speed" in k:
-                out["fan_rpm"] = int(value)
-            elif "fan duty" in k:
-                out["fan_duty"] = int(value)
+        read = {"at": time.time(), "skipped": skipped}
+        self.last_read = read
+        if msg is None:
+            read["why"] = f"상태 응답이 {STATUS_READ_TRIES}번 안에 안 옴"
+            return None
+        out = {
+            "liquid": msg[15] + msg[16] / 10,
+            "pump_rpm": msg[18] << 8 | msg[17],
+            "pump_duty": msg[19],
+            "fan_rpm": msg[24] << 8 | msg[23],
+            "fan_duty": msg[25],
+        }
+        read.update(out, reply=bytes(msg[:2]).hex(" "))
 
-        t = out.get("liquid")
-        if t is None or not (LIQUID_MIN <= t <= LIQUID_MAX):
+        if msg[15:17] == [0xFF, 0xFF]:
+            read["why"] = "장치가 수온을 못 읽음(FF FF, liquidctl 이 펌웨어 고장으로 보는 값)"
+            return None
+        if not (LIQUID_MIN <= out["liquid"] <= LIQUID_MAX):
+            read["why"] = "수온이 말이 안 되는 범위"
             return None
         # 펌프가 돌고 있는데 0 rpm 으로 읽히는 것도 같은 종류의 헛읽기다.
-        if out.get("pump_rpm", 0) <= 0:
+        if out["pump_rpm"] <= 0:
+            read["why"] = "펌프 0 rpm"
             return None
         return out
 

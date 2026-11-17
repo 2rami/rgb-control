@@ -221,6 +221,8 @@ class Player:
 
         self._img = None
         self._lock = threading.Lock()
+        # 새 장이 나오면 깨운다. 화면 쪽이 같은 장을 다시 인코딩하지 않게.
+        self._fresh = threading.Condition(self._lock)
         self._stop = threading.Event()
         self._vproc = None
         self._aproc = None
@@ -276,6 +278,18 @@ class Player:
         """가장 최근 한 장. 아직 없으면 None."""
         with self._lock:
             return self._img
+
+    def wait_new(self, seen, timeout):
+        """seen 번째 다음 장이 나올 때까지 기다린다.
+
+        (그림, 몇 번째 장) 을 돌려준다. 시간 안에 안 나오면 (None, seen).
+        곡이 바뀌어 번호가 처음부터 다시 세어져도 다르기만 하면 새 장이다.
+        """
+        with self._fresh:
+            self._fresh.wait_for(lambda: self.frames != seen or self._stop.is_set(), timeout)
+            if self.frames == seen or self._img is None:
+                return None, seen
+            return self._img, self.frames
 
     def _run(self):
         """재생목록이면 한 곡씩 이어서 튼다. 끝나면 처음으로 돌아간다."""
@@ -333,8 +347,9 @@ class Player:
 
         # 화면을 꽉 채운다. 16:9 영상이면 좌우가 잘리지만, 둥근 화면에
         # 검은 띠를 남기는 것보다 크게 보이는 쪽이 낫다는 거노 판단이다.
-        vf = (f"scale={W}:{H}:force_original_aspect_ratio=increase,"
-              f"crop={W}:{H},fps={self.fps}")
+        # 장 수를 먼저 줄인다. 뒤에 두면 버릴 장까지 크기를 바꾼다.
+        vf = (f"fps={self.fps},scale={W}:{H}:force_original_aspect_ratio=increase,"
+              f"crop={W}:{H}")
         # GIF 는 몇 초짜리라 그냥 두면 금방 끝난다. 무한 반복으로 돌린다.
         loop = ["-stream_loop", "-1"] if is_direct(self.url) else []
         cmd = (["ffmpeg", "-loglevel", "error"] + loop +
@@ -368,11 +383,12 @@ class Player:
             if raw is None:
                 break
             img = Image.frombytes("RGB", (W, H), raw)
-            with self._lock:
-                self._img = img
             if self.frames == 0:
                 self.error = ""     # 잘 나오기 시작했으면 앞선 경고는 지운다
-            self.frames += 1
+            with self._lock:
+                self._img = img
+                self.frames += 1
+                self._fresh.notify_all()
 
         # 한 곡이 끝난 것뿐이다. 다음 곡은 _run 이 이어서 튼다.
         # 소리(ffplay)는 영상보다 늦게 끝나는 일이 잦아서 반드시 같이 죽인다.

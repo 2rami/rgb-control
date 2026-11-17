@@ -445,10 +445,17 @@ def run_effect(hub, safe, ram):
 
 # 영상 재생기는 한 번에 하나만 돈다. 주소가 바뀌면 옛것을 끄고 새로 켠다.
 _player = {"obj": None, "url": None}
+# 화면 쪽이 마지막으로 가져간 장 번호. 같은 장을 두 번 인코딩하지 않는다.
+_video_seen = {"n": 0}
+
+# ffmpeg 에게 받는 초당 장 수. LCD 에 실제로 나오던 수(2026-11-18 실측 15.0장)에
+# 맞춘다. 30 으로 뽑아도 화면에는 15장만 나왔으니, 나머지 15장은 ffmpeg 이
+# 크기를 바꾸고 파이프로 밀고 파이썬이 읽어서 버리기만 했다.
+VIDEO_FPS = 15
 
 
 def video_frame():
-    """지금 틀어야 할 영상의 최신 한 장. 없으면 None.
+    """지금 틀어야 할 영상에서 지난번 뒤로 새로 나온 한 장. 0.1초 안에 없으면 None.
 
     재생목록을 골랐으면 그 목록을, 아니면 주소칸에 넣은 것을 튼다.
     """
@@ -467,7 +474,7 @@ def video_frame():
 
     if cur is None or _player["url"] != key or cur.done:
         stop_video()
-        cur = vid.Player(items[0] if items else url, audio=audio, items=items)
+        cur = vid.Player(items[0] if items else url, fps=VIDEO_FPS, audio=audio, items=items)
         # 제목은 곡을 열어야 알 수 있다. 알아내는 대로 목록에 채워 넣는다.
         cur.on_title = playlists.note_title
         cur.start()
@@ -480,7 +487,8 @@ def video_frame():
         snapshot["video_playing"] = not cur.done and cur.frames > 0
         snapshot["video_index"] = cur.index
         snapshot["video_total"] = cur.total
-    return cur.latest()
+    img, _video_seen["n"] = cur.wait_new(_video_seen["n"], 0.1)
+    return img
 
 
 # 우리가 띄우는 미디어 프로그램. 이름으로 알아본다.
@@ -553,8 +561,16 @@ def stop_video():
 # 집어서 보낸다. 서로 기다리지 않는다.
 # 칸은 하나뿐이라 못 보낸 프레임은 그냥 덮어써진다 - 밀린 옛 화면을
 # 뒤늦게 보여주는 것보다 최신 것을 보여주는 게 맞다(=지연이 안 쌓인다).
+#
+# ★다만 "계속"이 쉬지 않고였던 게 탈이었다. 영상은 새 장이 없어도 같은 장을
+# 몇 ms 마다 다시 돌리고 자르고 인코딩해서, LCD 가 초당 15장을 받는 동안
+# 이 스레드 혼자 CPU 한 코어를 썼다(2026-11-18 실측 1.12코어). 그래서
+# 영상은 새 장이 나올 때만, 쉬지 않고 바뀌는 화면(회전·화면 비추기)은
+# 보내는 쪽이 지난 장을 가져간 뒤에만 만든다. 만드는 데 몇 ms, 보내는 데
+# 수십 ms 라 보내는 쪽은 여전히 기다리지 않는다.
 _ready = {"data": None}
 _ready_lock = threading.Lock()
+_ready_cv = threading.Condition(_ready_lock)
 _orientation = {"v": 0}
 
 # 대시보드에 "지금 LCD 에 뭐가 나오나"를 보여주려고 마지막 그림을 들고 있는다.
@@ -563,16 +579,27 @@ _orientation = {"v": 0}
 _preview = {"img": None}
 
 
-def take_frame():
-    with _ready_lock:
+def take_frame(timeout=0.0):
+    """준비된 한 장. 없으면 timeout 초까지 기다렸다가 그래도 없으면 None."""
+    with _ready_cv:
+        if _ready["data"] is None and timeout:
+            _ready_cv.wait_for(lambda: _ready["data"] is not None, timeout)
         d = _ready["data"]
         _ready["data"] = None
+        _ready_cv.notify_all()
         return d
 
 
 def put_frame(data):
-    with _ready_lock:
+    with _ready_cv:
         _ready["data"] = data
+        _ready_cv.notify_all()
+
+
+def wait_taken(timeout):
+    """보내는 쪽이 지난 장을 가져갈 때까지. LCD 가 받는 것보다 빨리 만들지 않는다."""
+    with _ready_cv:
+        _ready_cv.wait_for(lambda: _ready["data"] is None, timeout)
 
 
 def frame_producer():
@@ -625,11 +652,14 @@ def frame_producer():
             time.sleep(1.0)
             continue
 
-        # 상태판은 1초에 한 장이면 충분하다.
-        # 나머지는 안 쉰다 - 인코딩 자체가 몇 ms 를 쓰고, 여기서 1ms 를
-        # 자라고 하면 윈도우는 15ms 를 자 버려 오히려 리듬이 깨진다.
+        # 상태판은 1초에 한 장이면 충분하다. 영상은 video_frame 이 다음 새 장을
+        # 기다린다. 쉬지 않고 바뀌는 화면은 보내는 쪽이 가져가기를 기다린다 -
+        # 잠으로 맞추지 않는 건, 1ms 를 자라고 하면 윈도우가 15ms 를 자 버려
+        # 리듬이 깨지기 때문이다.
         if mode in ("stats", "sync"):
             time.sleep(1.0)
+        elif mode != "video":
+            wait_taken(0.5)
 
 
 def kraken_once(k):
@@ -685,10 +715,12 @@ def kraken_once(k):
         stop_video()
         return 1.0        # 화면은 장치 기본 그대로 둔다
 
-    # 만드는 쪽이 준비해 둔 최신 한 장. 없으면 아직 안 만들어진 것이다.
-    data = take_frame()
+    # 만드는 쪽이 준비해 둔 최신 한 장. 없으면 나올 때까지 잠깐 기다린다 -
+    # 예전처럼 2ms 마다 다시 보러 오면 화면이 쉬는 동안에도 초당 500번 돈다.
+    # 0.1초면 상태 읽기(몇 초에 한 번) 차례를 놓칠 만큼 길지 않다.
+    data = take_frame(0.1)
     if data is None:
-        return 0.002   # 만드는 쪽이 아직 못 냈다
+        return 0.0
     k.show_raw(data)
     # ★실제로 보낸 것만 센다. 예전에는 루프가 돈 횟수를 세는 바람에
     # 보낼 게 없어 헛도는 것까지 세서 "초당 200장" 같은 거짓말이 나왔다.

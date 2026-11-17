@@ -27,10 +27,12 @@ import sys
 import threading
 import time
 
-from PIL import Image
-
 W = H = 640
 FRAME_BYTES = W * H * 3          # rgb24 는 픽셀당 3바이트
+
+# 장치 방향(90도씩 시계 방향으로 몇 번)만큼 돌리는 ffmpeg 필터. lcd_stream.fit 의
+# rotate(-90 * o) 와 바이트까지 같은 것을 네 방향 모두 확인했다(2026-11-18).
+_TURNS = ("", ",transpose=1", ",transpose=1,transpose=1", ",transpose=2")
 CREATE_NO_WINDOW = 0x08000000
 
 
@@ -200,14 +202,19 @@ class Player:
     fps 는 ffmpeg 에게 "초당 몇 장으로 뽑아 달라"고 하는 값이다. 원본이
     그보다 느리면 원본 속도가 상한이 된다. LCD 는 초당 30장 넘게 받으므로
     여기가 병목이 되지 않도록 30 으로 둔다.
+
+    한 장은 PIL 그림이 아니라 rgb24 바이트 그대로다. turn(0~3, 90도씩 시계 방향)이면
+    ffmpeg 이 돌려서 준다 - 파이썬에서 돌리면 메모리를 건너뛰며 읽어 장당 몇 ms 가
+    들고, ffmpeg 의 transpose 는 거의 공짜다(LCD 패널이 비뚤게 달린 만큼 미리 돌린다).
     """
 
-    def __init__(self, url, fps=30, audio=True, items=None):
+    def __init__(self, url, fps=30, audio=True, items=None, turn=0):
         # items 를 주면 그것을 그대로 튼다(대시보드의 재생목록).
         # 안 주면 url 이 재생목록인지 보고 알아서 펼친다(유튜브 믹스 등).
         self.items = list(items) if items else None
         self.url = url
         self.fps = fps
+        self.turn = turn % 4
         self.want_audio = audio
         self.title = url
         self.error = ""
@@ -219,7 +226,7 @@ class Player:
         # 곡 제목을 알아내면 이걸 부른다. 재생목록이 제목을 채우는 데 쓴다.
         self.on_title = None
 
-        self._img = None
+        self._raw = None
         self._lock = threading.Lock()
         # 새 장이 나오면 깨운다. 화면 쪽이 같은 장을 다시 인코딩하지 않게.
         self._fresh = threading.Condition(self._lock)
@@ -274,22 +281,17 @@ class Player:
             return None
         return pr
 
-    def latest(self):
-        """가장 최근 한 장. 아직 없으면 None."""
-        with self._lock:
-            return self._img
-
     def wait_new(self, seen, timeout):
         """seen 번째 다음 장이 나올 때까지 기다린다.
 
-        (그림, 몇 번째 장) 을 돌려준다. 시간 안에 안 나오면 (None, seen).
+        (rgb24 바이트, 몇 번째 장) 을 돌려준다. 시간 안에 안 나오면 (None, seen).
         곡이 바뀌어 번호가 처음부터 다시 세어져도 다르기만 하면 새 장이다.
         """
         with self._fresh:
             self._fresh.wait_for(lambda: self.frames != seen or self._stop.is_set(), timeout)
-            if self.frames == seen or self._img is None:
+            if self.frames == seen or self._raw is None:
                 return None, seen
-            return self._img, self.frames
+            return self._raw, self.frames
 
     def _run(self):
         """재생목록이면 한 곡씩 이어서 튼다. 끝나면 처음으로 돌아간다."""
@@ -349,7 +351,7 @@ class Player:
         # 검은 띠를 남기는 것보다 크게 보이는 쪽이 낫다는 거노 판단이다.
         # 장 수를 먼저 줄인다. 뒤에 두면 버릴 장까지 크기를 바꾼다.
         vf = (f"fps={self.fps},scale={W}:{H}:force_original_aspect_ratio=increase,"
-              f"crop={W}:{H}")
+              f"crop={W}:{H}" + _TURNS[self.turn])
         # GIF 는 몇 초짜리라 그냥 두면 금방 끝난다. 무한 반복으로 돌린다.
         loop = ["-stream_loop", "-1"] if is_direct(self.url) else []
         cmd = (["ffmpeg", "-loglevel", "error"] + loop +
@@ -382,11 +384,10 @@ class Player:
             raw = _read_exact(pipe, FRAME_BYTES)
             if raw is None:
                 break
-            img = Image.frombytes("RGB", (W, H), raw)
             if self.frames == 0:
                 self.error = ""     # 잘 나오기 시작했으면 앞선 경고는 지운다
             with self._lock:
-                self._img = img
+                self._raw = raw
                 self.frames += 1
                 self._fresh.notify_all()
 
@@ -411,14 +412,18 @@ def _read_exact(pipe, n):
 
     파이프는 요청한 만큼을 한 번에 안 줄 때가 많다. 한 번 읽고 말면 프레임이
     반쯤 잘려 화면이 찢어진다. 예전에 이걸로 한 번 당했다.
+    장마다 새 칸을 만들어 거기에 바로 읽는다 - 이어 붙이고 bytes 로 바꾸면 1.2MB 를
+    두세 번 더 베낀다. 새 칸인 것은, 앞 장을 화면 쪽이 아직 인코딩하고 있을 수 있어서다.
     """
-    buf = bytearray()
-    while len(buf) < n:
-        chunk = pipe.read(n - len(buf))
-        if not chunk:
+    buf = bytearray(n)
+    view = memoryview(buf)
+    got = 0
+    while got < n:
+        k = pipe.readinto(view[got:])
+        if not k:
             return None
-        buf += chunk
-    return bytes(buf)
+        got += k
+    return buf
 
 
 def main():

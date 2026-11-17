@@ -158,6 +158,28 @@ def crop_circle(img):
                            Image.new("RGB", RES, (0, 0, 0)), circle_mask())
 
 
+_keep_bytes = None
+
+
+def q565_circle(raw):
+    """이미 돌려진 640x640 rgb24 바이트를 원 바깥만 검게 해서 Q565 로.
+
+    crop_circle + to_q565 와 바이트까지 같다(2026-11-18 확인). 영상처럼 초당 열몇
+    장씩 오는 것을 PIL 을 거치지 않고 한 번에 처리한다: 원 안은 0xFF, 밖은 0x00 인
+    같은 길이의 표와 AND 하면 픽셀마다 세 바이트를 한 줄로 훑는다(장당 약 1ms,
+    PIL 합성은 약 4ms). 채널을 따로 곱하면 안쪽 고리가 3칸이라 오히려 느리다.
+    """
+    import numpy as np
+    import q565_rust
+
+    global _keep_bytes
+    if _keep_bytes is None:
+        inside = np.asarray(circle_mask()) > 0
+        _keep_bytes = np.repeat(np.where(inside, 255, 0).astype(np.uint8), 3)
+    out = np.bitwise_and(np.frombuffer(raw, np.uint8), _keep_bytes)
+    return q565_rust.py_encode(RES[0], RES[1], out.tobytes())
+
+
 def to_rgba(img):
     """무압축 경로용. RGB 뒤에 0을 하나씩 붙인 형식이다."""
     import numpy as np
@@ -246,10 +268,13 @@ def send_fast(dev, data, kind=KIND_Q565):
     """
     _ack(dev, [0x36, 0x01, 0x00, 0x01, kind], (0x37, 0x01), "빠른 경로 시작")
 
-    info = [kind, 0x00, 0x00, 0x00] + list(len(data).to_bytes(4, "little"))
-    dev._bulk_write(_BULK_HEADER + info)
+    # liquidctl 의 _bulk_write 는 윈도에서 bytes 로 바꿔 bulk_device.write(0x2, …) 를
+    # 부를 뿐이다. 거기에 넘기려고 한 장(수십~수백 KB)을 파이썬 정수 목록으로 풀었다가
+    # 다시 bytes 로 묶는 데 초당 15장이면 CPU 가 눈에 띄게 든다. 같은 바이트를 바로 보낸다.
+    info = bytes([kind, 0x00, 0x00, 0x00]) + len(data).to_bytes(4, "little")
+    dev.bulk_device.write(0x2, bytes(_BULK_HEADER) + info)
     for i in range(0, len(data), dev.bulk_buffer_size):
-        dev._bulk_write(list(data[i : i + dev.bulk_buffer_size]))
+        dev.bulk_device.write(0x2, bytes(data[i : i + dev.bulk_buffer_size]))
 
     # ★이 대답을 제대로 기다리는 것이 핵심이다. 이게 "한 장 다 그렸다"다.
     _ack(dev, [0x36, 0x02], (0x37, 0x02), "빠른 경로 종료")

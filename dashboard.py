@@ -306,13 +306,16 @@ def paint_targets(targets, colors, prepared, failed, solid=True):
 
     한 번 실패한 장치는 failed에 넣고 다시 건드리지 않는다. 말썽인 장치 하나가
     OpenRGB 전체를 끌어내리는 걸 막기 위해서다.
+
+    fast=True: 보내는 바이트는 같고, 보낸 뒤 장치 정보를 통째로 다시 받아 풀던 것만
+    안 한다(run_effect 의 hub.set_colors 와 같은 까닭).
     """
     if dark_now():
         # 화면이 꺼졌으면 램·글카·스피커도 같이 끈다.
         for d in targets:
             if prepare_device(d, prepared, failed):
                 try:
-                    d.set_colors([BLACK] * len(d.leds))
+                    d.set_colors([BLACK] * len(d.leds), fast=True)
                 except Exception:
                     failed.add(d.id)
         return
@@ -332,19 +335,19 @@ def paint_targets(targets, colors, prepared, failed, solid=True):
         picked = parts.device_color(name) if name else None
         try:
             if picked is not None:
-                d.set_colors([picked] * len(d.leds))
+                d.set_colors([picked] * len(d.leds), fast=True)
                 continue
             if solid:
-                d.set_colors([one] * len(d.leds))
+                d.set_colors([one] * len(d.leds), fast=True)
                 continue
             zones = getattr(d, "zones", None)
             if zones and len(zones) > 1:
                 out = []
                 for z in zones:
                     out += spread(src, len(z.leds))
-                d.set_colors(out)
+                d.set_colors(out, fast=True)
             else:
-                d.set_colors(spread(src, len(d.leds)))
+                d.set_colors(spread(src, len(d.leds)), fast=True)
         except Exception:
             failed.add(d.id)
 
@@ -433,7 +436,10 @@ def run_effect(hub, safe, ram):
         if dark:
             colors = [BLACK] * len(colors)
 
-        hub.set_colors(colors)
+        # fast=True: 기본값은 색을 보낸 뒤 OpenRGB 에 장치 정보(768칸의 이름·모드·색)를
+        # 통째로 다시 달라고 해서 파이썬으로 푼다. 초당 20번이라 이 스레드 혼자 0.14코어를
+        # 썼다(2026-11-18 스레드별 실측). 보내는 바이트는 같고, 그 정보는 아무도 안 읽는다.
+        hub.set_colors(colors, fast=True)
 
         tick += 1
         # ★꺼지거나 켜지는 순간에는 차례를 기다리지 않고 그 자리에서 맞춘다.
@@ -467,24 +473,31 @@ VIDEO_FPS = 15
 def video_frame():
     """지금 틀어야 할 영상에서 지난번 뒤로 새로 나온 한 장. 0.1초 안에 없으면 None.
 
-    재생목록을 골랐으면 그 목록을, 아니면 주소칸에 넣은 것을 튼다.
+    LCD 방향만큼 이미 돌려진 rgb24 바이트다. 재생목록을 골랐으면 그 목록을, 아니면
+    주소칸에 넣은 것을 튼다.
     """
     with lock:
         url = kraken_state["video_url"].strip()
         audio = kraken_state["video_audio"]
         list_id = kraken_state.get("play_list") or None
 
+    if not _orientation["known"]:
+        time.sleep(0.1)
+        return None
+    turn = _orientation["v"]
     items = playlists.urls_of(list_id) if list_id else None
-    key = f"list:{list_id}:{len(items or [])}" if list_id else url
+    base = f"list:{list_id}:{len(items or [])}" if list_id else url
 
     cur = _player["obj"]
-    if not key or (list_id and not items):
+    if not base or (list_id and not items):
         stop_video()
         return None
+    # 방향이 바뀌면(장치를 다시 붙였는데 방향이 달라졌을 때) ffmpeg 을 새로 띄운다.
+    key = f"{base}|turn{turn}"
 
     if cur is None or _player["url"] != key or cur.done:
         stop_video()
-        cur = vid.Player(items[0] if items else url, fps=VIDEO_FPS, audio=audio, items=items)
+        cur = vid.Player(items[0] if items else url, fps=VIDEO_FPS, audio=audio, items=items, turn=turn)
         # 제목은 곡을 열어야 알 수 있다. 알아내는 대로 목록에 채워 넣는다.
         cur.on_title = playlists.note_title
         cur.start()
@@ -497,8 +510,8 @@ def video_frame():
         snapshot["video_playing"] = not cur.done and cur.frames > 0
         snapshot["video_index"] = cur.index
         snapshot["video_total"] = cur.total
-    img, _video_seen["n"] = cur.wait_new(_video_seen["n"], 0.1)
-    return img
+    raw, _video_seen["n"] = cur.wait_new(_video_seen["n"], 0.1)
+    return raw
 
 
 # 우리가 띄우는 미디어 프로그램. 이름으로 알아본다.
@@ -581,12 +594,16 @@ def stop_video():
 _ready = {"data": None}
 _ready_lock = threading.Lock()
 _ready_cv = threading.Condition(_ready_lock)
-_orientation = {"v": 0}
+# known: 크라켄에 붙어 실제 방향을 읽었다. 영상은 ffmpeg 이 그 방향으로 돌려서 내므로
+# 그 전에 시작하면 틀린 방향으로 시작했다가 유튜브 요청을 한 번 더 하며 다시 열어야 한다.
+_orientation = {"v": 0, "known": False}
 
 # 대시보드에 "지금 LCD 에 뭐가 나오나"를 보여주려고 마지막 그림을 들고 있는다.
 # ★돌리기(fit) 전 그림을 둔다. fit 은 패널이 비뚤게 달린 것을 보정하려고
 # 미리 돌려 놓는 것이라, 그걸 그대로 보여주면 화면에서는 누워 보인다.
-_preview = {"img": None}
+# 영상은 PIL 그림 대신 돌려진 rgb24 바이트(raw)와 그 방향(turn)을 둔다. 그림으로 만드는
+# 것은 대시보드가 미리보기를 물을 때만 한다.
+_preview = {"img": None, "raw": None, "turn": 0}
 
 
 def take_frame(timeout=0.0):
@@ -638,10 +655,14 @@ def frame_producer():
                     sct = mss.MSS()
                 img = lm.grab_region(sct, box)
             elif mode == "video":
-                img = video_frame()
-                if img is None:
+                raw = video_frame()
+                if raw is None:
                     time.sleep(0.05)
                     continue
+                # 초당 열몇 장이라 PIL 을 거치지 않는다. 돌리기는 ffmpeg 이 이미 했다.
+                _preview.update(img=None, raw=raw, turn=_orientation["v"])
+                put_frame(L.q565_circle(raw))
+                continue
             elif mode == "spin":
                 img = lm.draw_spin(time.time())
             elif mode == "sync":
@@ -652,7 +673,7 @@ def frame_producer():
             else:
                 img = lm.draw_stats()
 
-            _preview["img"] = img
+            _preview.update(img=img, raw=None)
             fitted = L.fit(img, _orientation["v"])
             # 움직이는 화면은 디더를 안 쓴다. 디더가 압축을 깨서 데이터가
             # 두세 배로 불고 그만큼 느려지는데, 움직이면 띠는 잘 안 보인다.
@@ -773,6 +794,7 @@ def kraken_loop():
                 # 만드는 쪽이 미리 돌려 놓으려면 방향을 알아야 한다.
                 k.screen_ready()
                 _orientation["v"] = k.orientation
+                _orientation["known"] = True
                 say(f"크라켄 붙음 (화면 방향 {k.orientation})")
                 kraken_once.last_poll = 0.0
                 kraken_once.last_pump = None
@@ -1020,10 +1042,16 @@ def api_lcd_preview():
     """
     import io as _io
 
-    img = _preview["img"]
-    if img is None:
+    img, raw, turn = _preview["img"], _preview["raw"], _preview["turn"]
+    if img is None and raw is None:
         return ("", 204)
     try:
+        if img is None:
+            from PIL import Image
+            # 영상 장은 LCD 방향만큼 돌려진 채로 있다. 화면에는 바로 선 그림을 보인다.
+            img = Image.frombytes("RGB", (vid.W, vid.H), bytes(raw))
+            if turn:
+                img = img.rotate(90 * turn)
         small = img.convert("RGB").resize((220, 220))
         buf = _io.BytesIO()
         small.save(buf, format="JPEG", quality=72)

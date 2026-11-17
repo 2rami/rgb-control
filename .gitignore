@@ -33,6 +33,7 @@ __pycache__/
 
 # --- 로그·찌꺼기 ---
 *.log
+*.log.1
 disable_result.txt
 patch_result.txt
 *.kasabak

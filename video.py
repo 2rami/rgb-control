@@ -215,6 +215,7 @@ class Player:
         self.frames = 0
         self.index = 0      # 지금 몇 번째 곡인지
         self.total = 1
+        self._fails = 0     # 한 장도 못 뽑고 끝난 곡이 연달아 몇 개인지
         # 곡 제목을 알아내면 이걸 부른다. 재생목록이 제목을 채우는 데 쓴다.
         self.on_title = None
 
@@ -289,12 +290,25 @@ class Player:
         idx = 0
         while not self._stop.is_set():
             self.index = idx + 1
+            before = self.frames
             try:
                 self._play_one(items[idx])
             except Exception as e:
                 self.error = f"재생 실패: {e}"
             if self._stop.is_set():
                 break
+
+            # ★한 장도 못 뽑았으면 쉬었다 간다.
+            # 안 쉬면 못 여는 주소 하나로 ffmpeg 와 유튜브 요청이 끝없이
+            # 쏟아진다. 지워진 영상 하나를 초당 몇 번씩 두드린 끝에
+            # 유튜브가 이 PC 를 봇으로 보고 막은 적이 있다.
+            # 쉬는 시간은 2초에서 시작해 배로 늘리고 1분에서 멈춘다.
+            # 한 곡이라도 제대로 나오면 처음부터 다시 센다.
+            if self.frames == before:
+                self._fails += 1
+                self._stop.wait(min(60.0, 2.0 * 2 ** min(self._fails - 1, 5)))
+            else:
+                self._fails = 0
             idx = (idx + 1) % len(items)
         self._kill_all()      # 남은 것이 없게 한 번 더
         self.done = True
@@ -312,8 +326,7 @@ class Player:
                     pass
         except Exception as e:
             self.error = f"주소를 못 풀었다: {e}"
-            time.sleep(2)
-            return
+            return      # 쉬는 것은 _run 이 한 곳에서 맡는다
         # 주소 푸는 데 몇 초 걸린다. 그 사이에 멈춤이 왔을 수 있다.
         if self._stop.is_set():
             return

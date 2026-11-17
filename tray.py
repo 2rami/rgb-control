@@ -37,6 +37,8 @@ from pathlib import Path
 import pystray
 from PIL import Image, ImageDraw
 
+import log as log_mod
+
 HERE = Path(__file__).resolve().parent
 BASE = "http://127.0.0.1:5000"
 LOG = HERE / "tray.log"
@@ -44,6 +46,12 @@ LOG = HERE / "tray.log"
 # 대시보드가 뜨는 데 걸리는 시간. 장치를 다 잡을 때까지 기다린다.
 BOOT_WAIT = 40
 POLL_SECONDS = 3.0
+
+# 스스로 죽은 대시보드를 되살리는 한도. 이 시간 안에 이 횟수만큼 죽으면
+# 다시 띄워도 같은 이유로 또 죽는다고 보고 손을 뗀다. 한도가 없으면
+# "띄운다 -> 죽는다"가 영원히 돌아 컴퓨터만 잡아먹는다.
+REVIVE_MAX = 3
+REVIVE_WINDOW = 300.0
 
 MODES = [
     ("ice", "아이스"), ("wave", "물결"), ("rainbow", "순환"),
@@ -58,14 +66,7 @@ LCD_MODES = [
 ]
 
 
-def say(msg):
-    line = f"{time.strftime('%m-%d %H:%M:%S')}  {msg}"
-    print(line)
-    try:
-        with LOG.open("a", encoding="utf-8") as f:
-            f.write(line + "\n")
-    except Exception:
-        pass
+say = log_mod.writer(LOG, capture_stderr=True)
 
 
 # ------------------------------------------------------------------ 대시보드와 이야기
@@ -138,6 +139,7 @@ class Tray:
     def __init__(self, attach=False):
         self.attach = attach          # 남이 띄운 것에 붙기만 하는가
         self.child = None             # 내가 띄운 대시보드
+        self.revives = []             # 되살린 시각들
         self.state = None
         self.stopping = False
         self.icon = pystray.Icon("rgb-control", make_icon(),
@@ -157,6 +159,43 @@ class Tray:
         except Exception as e:
             say(f"준비 중 문제: {e}")
 
+    def _spawn_dashboard(self):
+        """대시보드를 자식으로 띄운다. pythonw 는 검은 창을 안 만든다."""
+        exe = Path(sys.executable)
+        pyw = exe.with_name("pythonw.exe")
+        runner = str(pyw if pyw.exists() else exe)
+        say(f"대시보드 띄움: {runner}")
+        self.child = subprocess.Popen(
+            [runner, "dashboard.py"], cwd=str(HERE),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+    def revive(self):
+        """스스로 죽은 대시보드를 다시 띄운다.
+
+        조명·펌프·LCD 가 전부 대시보드에 딸려 있어서, 죽은 채로 두면
+        아이콘만 남고 아무것도 안 된다. 실제로 2026-09-06 에 대시보드가
+        접근 위반으로 터진 뒤 두 시간 동안 아무도 그걸 몰랐다.
+        """
+        now = time.time()
+        self.revives = [t for t in self.revives if now - t < REVIVE_WINDOW]
+        if len(self.revives) >= REVIVE_MAX:
+            say(f"{int(REVIVE_WINDOW / 60)}분 안에 {REVIVE_MAX}번 죽어서 "
+                "되살리기를 그만둔다. 로그를 보고 직접 다시 켜라.")
+            self.icon.title = "RGB 제어 (대시보드가 계속 죽는다)"
+            return
+        self.revives.append(now)
+        say(f"대시보드를 다시 띄운다 ({len(self.revives)}/{REVIVE_MAX})")
+        try:
+            # 두 번째부터는 준비(OpenRGB 확인)부터 다시 한다. 한 번 죽은
+            # 뒤라면 OpenRGB 가 없어졌을 수 있고, 그러면 그냥 띄워 봐야
+            # 같은 자리에서 또 죽는다. 첫 번째는 잠깐 어긋난 것일 수도
+            # 있으니 곧바로 띄워 조명이 빨리 돌아오게 한다.
+            if len(self.revives) > 1:
+                self.prepare()
+            self._spawn_dashboard()
+        except Exception as e:
+            say(f"다시 띄우기 실패: {e}")
+
     def start_backend(self):
         """대시보드를 자식으로 띄운다."""
         if alive():
@@ -167,14 +206,7 @@ class Tray:
             return
 
         self.prepare()
-        # pythonw 는 검은 창을 안 만든다.
-        exe = Path(sys.executable)
-        pyw = exe.with_name("pythonw.exe")
-        runner = str(pyw if pyw.exists() else exe)
-        say(f"대시보드 띄움: {runner}")
-        self.child = subprocess.Popen(
-            [runner, "dashboard.py"], cwd=str(HERE),
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        self._spawn_dashboard()
 
     def stop_backend(self):
         """내가 띄운 대시보드를 끈다. 남의 것은 안 건드린다."""
@@ -323,12 +355,12 @@ class Tray:
 
         while not self.stopping:
             self._refresh_once()
-            # 내가 띄운 대시보드가 죽었으면 아이콘으로 알린다. 되살리지는
-            # 않는다 - 왜 죽었는지 모르는 채로 다시 띄우면 같은 실패를
-            # 무한히 되풀이한다.
+            # 내가 띄운 대시보드가 죽었으면 다시 띄운다. 같은 이유로
+            # 거듭 죽으면 revive 가 알아서 손을 뗀다.
             if self.child is not None and self.child.poll() is not None:
                 say(f"대시보드가 스스로 죽었다 (코드 {self.child.returncode})")
                 self.child = None
+                self.revive()
             time.sleep(POLL_SECONDS)
 
     def run(self):

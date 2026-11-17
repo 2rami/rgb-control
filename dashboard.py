@@ -8,10 +8,8 @@ OpenRGB에 접근하는 건 효과 스레드 하나뿐이다. Flask 쪽은 state
 프로토콜이 엉켜서 통신이 깨진다.
 """
 
-import faulthandler
 import logging
 import subprocess
-import sys
 import threading
 import time
 from pathlib import Path
@@ -23,6 +21,7 @@ from openrgb.utils import RGBColor
 import effects
 import fan
 import kraken as kr
+import log as log_mod
 import lcd_monitor as lm
 import video as vid
 import cookies_setup
@@ -184,6 +183,21 @@ def dark_now():
     with lock:
         want = state["off_with_monitor"]
     return want and not monitor.is_on()
+
+
+def lcd_asleep():
+    """지금 LCD 를 재워야 하는가.
+
+    ★화면을 만드는 쪽(frame_producer)과 보내는 쪽(kraken_once)이 이 판단을
+    따로 하면 서로 싸운다. 실제로 보내는 쪽만 모니터를 보고 있어서, 모니터를
+    끄면 보내는 쪽이 1초마다 stop_video() 로 영상을 죽이고 만드는 쪽은 그걸
+    모른 채 곧바로 새로 띄웠다. 다섯 시간 동안 ffmpeg·ffplay 가 18,682번
+    태어났다 죽었고, 유튜브는 그 요청 폭주를 봇으로 보고 막았다.
+    """
+    with lock:
+        sleeps = kraken_state["lcd_off_with_monitor"]
+    # ★lock 을 놓고 부른다. dark_now 가 같은 lock 을 다시 잡는다.
+    return sleeps and dark_now()
 
 
 def collect_devices(cli):
@@ -573,7 +587,11 @@ def frame_producer():
             mode = kraken_state["lcd_mode"]
             box = kraken_state["mirror_box"]
 
-        if mode == "off" or not kraken_state["enabled"]:
+        if mode == "off" or not kraken_state["enabled"] or lcd_asleep():
+            # 재생기를 만드는 곳이 여기뿐이니 정리도 여기서 한다. 만드는 쪽이
+            # 쉬는 줄 모르면 남이 죽인 것을 곧바로 되살리게 된다.
+            if _player["obj"] is not None:
+                stop_video()
             time.sleep(0.3)
             continue
 
@@ -614,7 +632,7 @@ def frame_producer():
             time.sleep(1.0)
 
 
-def kraken_once(k, mirror_sct):
+def kraken_once(k):
     """한 바퀴: 상태 읽고 -> 펌프 맞추고 -> 화면 한 장.
 
     화면을 그리는 것과 펌프를 정하는 것은 주기가 다르다. 상태 읽기는 장치와
@@ -654,8 +672,6 @@ def kraken_once(k, mirror_sct):
 
     with lock:
         lcd_mode = kraken_state["lcd_mode"]
-        box = kraken_state["mirror_box"]
-        lcd_sleeps = kraken_state["lcd_off_with_monitor"]
 
     # 영상을 트는 중이 아닌데 소리가 나면 안 된다. 몇 초에 한 번 확인한다.
     now2 = time.time()
@@ -663,7 +679,7 @@ def kraken_once(k, mirror_sct):
         kraken_once.last_sweep = now2
         sweep_media("(영상 모드가 아님)")
 
-    if lcd_mode == "off" or (lcd_sleeps and dark_now()):
+    if lcd_mode == "off" or lcd_asleep():
         # 모니터가 꺼졌으면 LCD 도 쉰다. 아무도 안 보는데 초당 서른 장을
         # 보낼 이유가 없다. 다만 그렇게 할지는 따로 고를 수 있다.
         stop_video()
@@ -689,8 +705,6 @@ kraken_once.last_sweep = 0.0
 
 def kraken_loop():
     """끊겨도 계속 되살아나는 바깥 루프. 조명 쪽과 같은 구조다."""
-    import mss
-
     kraken_loop.fails = getattr(kraken_loop, "fails", 0)
 
     while True:
@@ -698,7 +712,7 @@ def kraken_loop():
             time.sleep(3)
             continue
         try:
-            with kr.Kraken() as k, mss.MSS() as sct:
+            with kr.Kraken() as k:
                 # 만드는 쪽이 미리 돌려 놓으려면 방향을 알아야 한다.
                 k.screen_ready()
                 _orientation["v"] = k.orientation
@@ -710,7 +724,7 @@ def kraken_loop():
                 # 5장으로 보인다. 그것 때문에 엉뚱한 곳을 최적화할 뻔했다.
                 kraken_once.sent, t0 = 0, time.time()
                 while kraken_state["enabled"]:
-                    nap = kraken_once(k, sct)
+                    nap = kraken_once(k)
                     now = time.time()
                     if now - t0 >= 2.0:
                         with lock:
@@ -1044,14 +1058,11 @@ def api_effect():
 LOG = Path(__file__).with_name("dashboard.log")
 
 
-def say(msg):
-    line = f"{time.strftime('%m-%d %H:%M:%S')}  {msg}"
-    print(line)
-    try:
-        with LOG.open("a", encoding="utf-8") as f:
-            f.write(line + "\n")
-    except Exception:
-        pass
+# pythonw 로 띄우면 콘솔이 없어서, 죽어도 이유가 아무데도 안 남는다.
+# 실제로 한 번 조용히 죽어서 조명이 멈춘 적이 있다. 그래서 파이썬이
+# 터질 때의 스택까지 이 파일로 받는다. 넘치면 log.py 가 지난 판으로
+# 밀어내므로 무한히 자라지 않는다.
+say = log_mod.writer(LOG, capture_stderr=True)
 
 
 def sharpen_timer():
@@ -1071,11 +1082,6 @@ def sharpen_timer():
 
 
 def main():
-    # pythonw로 띄우면 콘솔이 없어서, 죽어도 이유가 아무데도 안 남는다.
-    # 실제로 한 번 조용히 죽어서 조명이 멈춘 적이 있다. 그래서 파일로 남긴다.
-    sys.stderr = LOG.open("a", encoding="utf-8", buffering=1)
-    faulthandler.enable(sys.stderr)   # 파이썬 자체가 터져도 흔적은 남는다
-
     # 브라우저가 0.5초마다 상태를 물어서, 그냥 두면 로그가 접속 기록으로
     # 도배된다. 정작 조명이 왜 멈췄는지는 그 사이에 묻힌다.
     logging.getLogger("werkzeug").setLevel(logging.ERROR)

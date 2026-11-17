@@ -951,7 +951,7 @@ function render(s) {
     ? (k.pump_rpm || 0) + " rpm" +
       (k.fan_rpm === 0 ? " · 크라켄에 직접 물린 팬 없음" : "")
     : (k.error || "연결 확인 중")) +
-    (untrusted ? " · " + why + " - 펌프 고정, 수온 곡선 안 씀" : "");
+    (untrusted ? " · " + why + " - 수온 곡선 안 씀. 센서가 59도를 넘게 말하는 동안은 장치가 펌프를 100% 로 돌린다" : "");
   document.querySelectorAll("[data-pump]").forEach(function (b) {
     b.classList.toggle("on", b.dataset.pump === ks.pump_mode);
   });

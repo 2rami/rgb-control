@@ -113,6 +113,10 @@ kraken_state = {
     # 모니터가 꺼질 때 LCD 도 같이 끌 것인가. 조명과 따로 고른다 - 케이스가
     # 책상 위에 있으면 화면을 끈 뒤에도 수온 정도는 보고 싶을 수 있다.
     "lcd_off_with_monitor": True,
+    # 수온 센서를 믿지 않는다. 켜져 있으면 펌프는 kr.UNTRUSTED_PUMP_DUTY 로 묶고
+    # 수온 곡선은 안 쓴다. 센서 값은 계속 읽어 보여주고, 오르면 기록만 남긴다.
+    "liquid_untrusted": False,
+    "liquid_note": "",      # 왜 안 믿는지 - 화면과 트레이에 그대로 보인다
 }
 
 
@@ -684,23 +688,35 @@ def kraken_once(k):
         st = k.status()
         with lock:
             snapshot["kraken_last_read"] = dict(k.last_read)
+            untrusted = kraken_state["liquid_untrusted"]
+            mode = kraken_state["pump_mode"]
+            want = kraken_state["pump_duty"]
         # 헛읽기면 이번 회차는 통째로 건너뛴다. 옛 값을 그대로 두는 게
-        # 0도라는 거짓말을 믿고 펌프를 늦추는 것보다 안전하다.
+        # 0도라는 거짓말을 믿고 펌프를 늦추는 것보다 안전하다. 센서를 안 믿을
+        # 때는 펌프가 읽기와 상관없으니 그대로 맞추러 간다.
         if st is None:
             kraken_once.bad_reads += 1
             with lock:
                 snapshot["kraken_bad_reads"] = kraken_once.bad_reads
-            return 0.0
-        with lock:
-            snapshot.update(kraken_ok=True, kraken_error="", kraken_status_at=time.time(),
-                            liquid=st.get("liquid"),
-                            pump_rpm=st.get("pump_rpm"),
-                            pump_duty=st.get("pump_duty"),
-                            fan_rpm=st.get("fan_rpm"))
-            mode = kraken_state["pump_mode"]
-            want = kraken_state["pump_duty"]
+            if not untrusted:
+                return 0.0
+        else:
+            with lock:
+                snapshot.update(kraken_ok=True, kraken_error="", kraken_status_at=time.time(),
+                                liquid=st.get("liquid"),
+                                pump_rpm=st.get("pump_rpm"),
+                                pump_duty=st.get("pump_duty"),
+                                fan_rpm=st.get("fan_rpm"))
+            # 안 믿는 센서라도 값이 계속 오르면 교환 신청 때 쓸 수 있게 1도마다 남긴다.
+            t = st.get("liquid")
+            if untrusted and t is not None and t >= kraken_once.liquid_high + 1.0:
+                kraken_once.liquid_high = t
+                say(f"수온 센서 {t:.1f}도, 펌프 {st.get('pump_rpm')} rpm "
+                    "(센서를 믿지 않는 중 - 기록만)")
 
-        if mode == "curve":
+        if untrusted:
+            want = kr.UNTRUSTED_PUMP_DUTY
+        elif mode == "curve":
             want = int(round(kr.interpolate(kr.DEFAULT_CURVE,
                                             st.get("liquid", 40))))
         # 1~2% 흔들릴 때마다 명령을 보내면 장치를 괴롭히기만 한다.
@@ -737,6 +753,7 @@ def kraken_once(k):
 
 kraken_once.last_poll = 0.0
 kraken_once.last_pump = None
+kraken_once.liquid_high = float("-inf")
 kraken_once.bad_reads = 0
 kraken_once.sent = 0
 kraken_once.last_sweep = 0.0
@@ -939,6 +956,10 @@ def api_kraken():
             kraken_state["mirror_box"] = int(max(200, min(1440, int(data["mirror_box"]))))
         if "lcd_off_with_monitor" in data:
             kraken_state["lcd_off_with_monitor"] = bool(data["lcd_off_with_monitor"])
+        if "liquid_untrusted" in data:
+            kraken_state["liquid_untrusted"] = bool(data["liquid_untrusted"])
+        if "liquid_note" in data:
+            kraken_state["liquid_note"] = str(data["liquid_note"])[:200]
         st = dict(kraken_state)
     remember()
     # 손으로 정한 값은 다음 한 바퀴를 기다리지 말고 바로 반영되게 한다.

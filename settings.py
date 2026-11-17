@@ -65,6 +65,8 @@ KRAKEN_RULES = {
     "video_audio": lambda v: bool(v),
     "play_list": lambda v: None if v is None else _text(v, 40),
     "lcd_off_with_monitor": lambda v: bool(v),
+    "liquid_untrusted": lambda v: bool(v),
+    "liquid_note": lambda v: _text(v, 200),
 }
 
 

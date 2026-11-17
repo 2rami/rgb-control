@@ -98,6 +98,14 @@ def alive():
     return get_state(timeout=1.0) is not None
 
 
+def liquid_text(k):
+    """풍선말과 상태 메뉴의 수온 한 마디. 안 믿기로 한 센서 값은 수온처럼 안 보인다."""
+    if k.get("state", {}).get("liquid_untrusted"):
+        return k.get("state", {}).get("liquid_note") or "수온 센서 고장 의심"
+    liquid = k.get("liquid")
+    return f"{liquid:.1f}도" if isinstance(liquid, (int, float)) else "읽는 중"
+
+
 # ------------------------------------------------------------------ 아이콘 그림
 
 
@@ -268,9 +276,7 @@ class Tray:
             name = "꺼짐"
         out = [f"조명   {name}  #{light.get('color', '?')}"]
         if k.get("ok"):
-            liquid = k.get("liquid")
-            out.append(f"수온   {liquid:.1f}도" if isinstance(liquid, (int, float))
-                       else "수온   읽는 중")
+            out.append("수온   " + liquid_text(k))
             out.append(f"펌프   {k.get('pump_duty', '?')}%"
                        f"  ({k.get('pump_rpm', '?')} rpm)")
             lcd = dict(LCD_MODES).get(k.get("state", {}).get("lcd_mode"), "?")
@@ -333,10 +339,9 @@ class Tray:
         self.icon.icon = make_icon(light.get("color", "9bd7ff"), dark)
 
         k = s.get("kraken", {})
-        liquid = k.get("liquid")
         bits = ["RGB 제어"]
-        if isinstance(liquid, (int, float)):
-            bits.append(f"수온 {liquid:.1f}도")
+        if k.get("state", {}).get("liquid_untrusted") or isinstance(k.get("liquid"), (int, float)):
+            bits.append("수온 " + liquid_text(k))
         bits.append("조명 " + ("꺼짐" if light.get("mode") == "off" else "켜짐"))
         # 트레이 풍선말은 128자까지만 보여준다. 넘칠 일은 없지만 줄여 둔다.
         self.icon.title = " · ".join(bits)[:127]

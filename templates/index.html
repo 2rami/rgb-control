@@ -928,8 +928,14 @@ function render(s) {
   const ks = k.state || {};
   const cpu = s.cpu || {}, gpu = s.gpu;
 
-  $("bLiquid").innerHTML = k.ok
-    ? (k.liquid || 0).toFixed(1) + '<small>°C</small>' : "--";
+  // 센서를 안 믿기로 했으면 그 값을 수온처럼 크게 보이지 않는다. 값은 풍선말에만.
+  const untrusted = !!ks.liquid_untrusted;
+  const why = ks.liquid_note || "수온 센서 고장 의심";
+  $("bLiquid").innerHTML = !k.ok ? "--"
+    : untrusted ? '<small>센서 이상</small>'
+    : (k.liquid || 0).toFixed(1) + '<small>°C</small>';
+  $("bLiquid").title = untrusted && k.ok
+    ? why + " · 센서가 말하는 값 " + (k.liquid || 0).toFixed(1) + "°C" : "";
   $("bPump").innerHTML = k.ok ? (k.pump_duty || 0) + '<small>%</small>' : "--";
   $("bCpu").innerHTML  = (cpu.util || 0).toFixed(0) + '<small>%</small>';
   $("bGpu").innerHTML  = gpu ? gpu.temp + '<small>°C</small>' : "--";
@@ -939,12 +945,13 @@ function render(s) {
   $("lampMon").className = "lamp " + (mOn ? "ok" : "");
   $("err").textContent = s.error ? "조명 오류: " + s.error : "";
 
-  $("liquidBar").style.width = (k.ok ? pct(k.liquid, 30, 60) : 0) + "%";
+  $("liquidBar").style.width = (k.ok && !untrusted ? pct(k.liquid, 30, 60) : 0) + "%";
   $("pumpBar").style.width   = (k.ok ? (k.pump_duty || 0) : 0) + "%";
-  $("fanNote").textContent = k.ok
+  $("fanNote").textContent = (k.ok
     ? (k.pump_rpm || 0) + " rpm" +
       (k.fan_rpm === 0 ? " · 크라켄에 직접 물린 팬 없음" : "")
-    : (k.error || "연결 확인 중");
+    : (k.error || "연결 확인 중")) +
+    (untrusted ? " · " + why + " - 펌프 고정, 수온 곡선 안 씀" : "");
   document.querySelectorAll("[data-pump]").forEach(function (b) {
     b.classList.toggle("on", b.dataset.pump === ks.pump_mode);
   });

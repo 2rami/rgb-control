@@ -114,8 +114,8 @@ kraken_state = {
     # 책상 위에 있으면 화면을 끈 뒤에도 수온 정도는 보고 싶을 수 있다.
     "lcd_off_with_monitor": True,
     # 수온 센서를 믿지 않는다. 켜져 있으면 수온 곡선은 안 쓰고 펌프에는
-    # kr.UNTRUSTED_PUMP_DUTY 를 보낸다(센서가 59도를 넘게 말하면 장치는 그래도 100% 로
-    # 돈다 - kraken.py 참고). 센서 값은 계속 읽어 보여주고, 오르면 기록만 남긴다.
+    # kr.UNTRUSTED_PUMP_DUTY(100%) 를 보낸다(kraken.py 참고). 센서 값은 계속 읽어
+    # 보여주고, 오르면 기록만 남긴다.
     "liquid_untrusted": False,
     "liquid_note": "",      # 왜 안 믿는지 - 화면과 트레이에 그대로 보인다
 }
